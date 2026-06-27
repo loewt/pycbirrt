@@ -116,6 +116,23 @@ def test_to_system_configuration_places_joints_at_correct_indices(manipulator):
 
 
 @requires_robot
+def test_system_to_controlled_round_trips_default_config(manipulator):
+    from pycbirrt.backends.gafro import GafroRobotModel
+
+    model = GafroRobotModel.from_file(ROBOT, chain_name=CHAIN)
+    dc = model.default_system_configuration
+    start = model.system_to_controlled(dc)
+    assert start.shape == (model.dof,)
+
+    sys_q = model.to_system_configuration(start)  # base defaults to the default config
+    # Non-chain joints keep the default pose; chain joints are set to `start`.
+    others = np.delete(np.arange(model._system_dof), model._task_to_system)
+    assert np.allclose(sys_q[others], dc[others])
+    chain_sys_idx = model._task_to_system[model._ctrl_idx]
+    assert np.allclose(sys_q[chain_sys_idx], start)
+
+
+@requires_robot
 def test_plan_to_tsr_end_to_end():
     """Regression for the (7,)+(6,) crash: a full plan to a TSR must succeed."""
     from tsr import TSR

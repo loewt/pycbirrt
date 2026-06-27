@@ -77,6 +77,10 @@ class GafroRobotModel:
         ramp = np.arange(self._system_dof, dtype=float)
         self._task_to_system = np.asarray(
             self.manipulator.extract_configuration(ramp), dtype=int)
+        # The System's default pose for the whole robot; used as the base for
+        # visualization so non-chain joints (other arms, torso) keep their pose.
+        self.default_system_configuration = np.asarray(
+            system.get_default_configuration(), dtype=float)
 
     @classmethod
     def from_file(cls, path: str, chain_name: str | None = None,
@@ -116,16 +120,32 @@ class GafroRobotModel:
         q_full[self._ctrl_idx] = np.asarray(q, dtype=float)
         return q_full
 
-    def to_system_configuration(self, q: np.ndarray) -> np.ndarray:
+    def to_system_configuration(self, q: np.ndarray,
+                                base: np.ndarray | None = None) -> np.ndarray:
         """Controlled-width ``q`` -> full System-width config for visualization.
 
-        Scatters this chain's joints into their System indices (other joints left
-        at zero), so a ``Visualizer`` driven by the System renders the arm in the
-        right pose -- unlike front-padding, which mis-assigns the joint slots.
+        Scatters this chain's joints into their System indices on top of ``base``
+        (the System default configuration if not given), so a ``Visualizer``
+        driven by the System renders this arm in the planned pose while the rest
+        of the robot (other arms, torso) keeps ``base``'s pose. Front-padding, by
+        contrast, mis-assigns the joint slots and collapses the whole robot.
         """
-        system_q = np.zeros(self._system_dof)
+        if base is None:
+            base = self.default_system_configuration
+        system_q = np.asarray(base, dtype=float).copy()
         system_q[self._task_to_system] = self._to_task_full(q)
         return system_q
+
+    def system_to_controlled(self, system_q: np.ndarray) -> np.ndarray:
+        """System-width config -> this chain's controlled-width config.
+
+        Inverse of :meth:`to_system_configuration` for the chain's joints; use it
+        to seed planning from e.g. ``system.get_default_configuration()``.
+        """
+        task = np.asarray(
+            self.manipulator.extract_configuration(np.asarray(system_q, dtype=float)),
+            dtype=float)
+        return task[self._ctrl_idx]
 
 
 class GafroIKSolver:

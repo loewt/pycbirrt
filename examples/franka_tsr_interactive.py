@@ -42,11 +42,6 @@ from pycbirrt.backends.gafro import GafroIKSolver, GafroRobotModel
 DEFAULT_ROBOT = "/home/tobi/coding/src/rss/geodude.xml"
 DEFAULT_CHAIN = "left_ur5e/endeffector_link"
 
-# Start configuration in the task space's CONTROLLED joints (a neutral pose with
-# the EE in front of the base). Used only if it already matches the robot's
-# controlled DOF; otherwise TSRPlanner falls back to the joint-limit midpoint.
-START_Q = np.array([0.0, -0.4, 0.0, -2.0, 0.0, 1.6, 0.8])
-
 # The goal TSR is centered on the end-effector pose at this reference config (a
 # fraction of the way across the controlled joint range). Deriving the center
 # from FK keeps the region reachable for whatever arm/chain is loaded, instead of
@@ -74,13 +69,11 @@ class TSRPlanner:
             angular_joints=(True,) * self.robot.dof,
         )
         self.planner = CBiRRT(self.robot, self.ik, NoCollision(), self.config)
-        # Size the start to the robot's controlled DOF: use the literal if it
-        # already matches, else the joint-limit midpoint.
-        if START_Q.shape[0] == self.robot.dof:
-            self.start = START_Q
-        else:
-            lower, upper = self.robot.joint_limits
-            self.start = 0.5 * (lower + upper)
+        # Plan from the System's default configuration, extracted down to this
+        # chain's controlled joints. The full default pose is kept as the base for
+        # visualization so the rest of the robot renders correctly.
+        self.start = self.robot.system_to_controlled(
+            self.robot.default_system_configuration)
 
         # Reference goal pose derived from FK at a reachable config, so the TSR
         # region is reachable for whatever arm is loaded (see TSR_REF_FRACTION).
@@ -134,6 +127,7 @@ def visualize(planner: TSRPlanner, port: int):
     system = planner.robot.system  # same System the planner does its math on
 
     viz = ga.Visualizer(port=port)
+    print(planner.robot.mesh_root)
     robot_viz = viz.add_robot(system, mesh_root=planner.robot.mesh_root,
                               joint_sliders=False)  # driven by playback
 
