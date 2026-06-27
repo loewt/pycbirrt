@@ -70,6 +70,13 @@ class GafroRobotModel:
         self._lower = full_lower[self._ctrl_idx]
         self._upper = full_upper[self._ctrl_idx]
         self._base_full = 0.5 * (full_lower + full_upper)
+        # Map each task-space joint to its index in the System's full config. The
+        # task space's extract_configuration() does system -> task; feeding it a
+        # ramp recovers, for each task joint k, the system index it came from.
+        self._system_dof = int(system.get_dof())
+        ramp = np.arange(self._system_dof, dtype=float)
+        self._task_to_system = np.asarray(
+            self.manipulator.extract_configuration(ramp), dtype=int)
 
     @classmethod
     def from_file(cls, path: str, chain_name: str | None = None,
@@ -101,9 +108,24 @@ class GafroRobotModel:
         ``q`` is controlled-width (:attr:`dof`); it is scattered into the full
         chain config (non-controlled joints held at the limit midpoint) before FK.
         """
+        return self.manipulator.compute_ee_motor(self._to_task_full(q))
+
+    def _to_task_full(self, q: np.ndarray) -> np.ndarray:
+        """Controlled-width ``q`` -> full task-width config (non-controlled held)."""
         q_full = self._base_full.copy()
         q_full[self._ctrl_idx] = np.asarray(q, dtype=float)
-        return self.manipulator.compute_ee_motor(q_full)
+        return q_full
+
+    def to_system_configuration(self, q: np.ndarray) -> np.ndarray:
+        """Controlled-width ``q`` -> full System-width config for visualization.
+
+        Scatters this chain's joints into their System indices (other joints left
+        at zero), so a ``Visualizer`` driven by the System renders the arm in the
+        right pose -- unlike front-padding, which mis-assigns the joint slots.
+        """
+        system_q = np.zeros(self._system_dof)
+        system_q[self._task_to_system] = self._to_task_full(q)
+        return system_q
 
 
 class GafroIKSolver:

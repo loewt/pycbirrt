@@ -99,6 +99,23 @@ def test_robot_model_fk_accepts_controlled_width(manipulator):
 
 
 @requires_robot
+def test_to_system_configuration_places_joints_at_correct_indices(manipulator):
+    from pycbirrt.backends.gafro import GafroRobotModel
+
+    model = GafroRobotModel.from_file(ROBOT, chain_name=CHAIN)
+    q = np.arange(1, model.dof + 1, dtype=float)  # distinctive controlled values
+    sys_q = model.to_system_configuration(q)
+
+    assert sys_q.shape == (model._system_dof,)
+    # Controlled joints must land at their System indices (system 1..6 here),
+    # NOT front-padded into 0..5 (the bug that hid the robot).
+    ctrl_sys_idx = model._task_to_system[model._ctrl_idx]
+    assert np.allclose(sys_q[ctrl_sys_idx], q)
+    # The first arm joint value must not leak into system index 0 (the torso).
+    assert sys_q[0] != q[0]
+
+
+@requires_robot
 def test_plan_to_tsr_end_to_end():
     """Regression for the (7,)+(6,) crash: a full plan to a TSR must succeed."""
     from tsr import TSR

@@ -148,7 +148,7 @@ def visualize(planner: TSRPlanner, port: int):
                              name="/ee_start", color=(0, 80, 255), radius=0.025)
     ee_frame = viz.add_motor(planner.robot.forward_kinematics(planner.start), name="/ee_pose",
                              axes_length=0.12, axes_radius=0.005)
-    robot_viz.update(_pad(planner.start, system.get_dof()))
+    robot_viz.update(planner.robot.to_system_configuration(planner.start))
 
     # -- GUI: TSR extent sliders + a status readout ------------------------
     with viz.gui.add_folder("TSR region (Bw)"):
@@ -197,7 +197,7 @@ def visualize(planner: TSRPlanner, port: int):
             return
         i = state["frame"] % len(path)
         q = path[i]
-        robot_viz.update(_pad(q, system.get_dof()))
+        robot_viz.update(planner.robot.to_system_configuration(q))
         ee_frame.gafro = planner.robot.forward_kinematics(q)
         ee_frame.redraw()
         state["frame"] = (state["frame"] + 1) % len(path)
@@ -206,12 +206,6 @@ def visualize(planner: TSRPlanner, port: int):
     viz.add_ticker(tick)
     viz.show("\nviser running at http://localhost:%d  (drag the TSR sliders; ctrl-c to quit)"
              % port)
-
-
-def _pad(q, dof):
-    full = np.zeros(dof)
-    full[: len(q)] = np.asarray(q, dtype=float)
-    return full
 
 
 def _quat(rot3):
