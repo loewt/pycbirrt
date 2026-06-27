@@ -1,7 +1,9 @@
-# Gafro backend: drive IK/planning off the task space's controllable DOF
+# Gafro backend: drive IK/planning off the task space's *controlled* DOF
 
 **Date:** 2026-06-26
-**Scope:** `pycbirrt/src/pycbirrt/backends/gafro.py` and `pycbirrt/examples/franka_tsr_interactive.py` only.
+**Scope (two repos):**
+1. `gafropy` — `src/gafropy/cpp/robots/TaskSpace.cpp` (expose the missing bindings) + wheel rebuild.
+2. `pycbirrt` — `src/pycbirrt/backends/gafro.py` and `examples/franka_tsr_interactive.py`.
 
 ## Problem
 
@@ -13,151 +15,159 @@ ValueError: operands could not be broadcast together with shapes (7,) (6,)
   q = self._clamp_to_limits(q + dq)
 ```
 
-### Root cause (verified empirically)
+### Root cause
 
-The backend conflates three numbers that are equal for a plain revolute arm but
-diverge for a chain that contains a non-revolute joint:
+gafro's C++ `TaskSpace` deliberately distinguishes two DOF counts, but the gafropy
+binding only exposes one of them, so pycbirrt mixes them.
 
-| Quantity | Source | Value for this chain |
-|---|---|---|
-| Reported DOF | `manipulator.get_dof()` | **7** |
-| Joint-limit length | `get_joint_limits_min/max()` | **7** |
-| Geometric Jacobian columns | `compute_ee_geometric_jacobian(q).shape[1]` | **6** |
-| EE error dimension | `Motor.log()` | 6 |
+From the C++ source (`gafro/robot/task_space/TaskSpace.{hpp,hxx}`,
+`SingleArmTaskSpace.hxx`):
 
-`solve()` builds `q` and the joint-limit clamp from `get_dof()` (7) but builds
-`dq = J.T @ ...` from the geometric Jacobian (6 columns). `q + dq` is then
-`(7,) + (6,)` → broadcast error.
+- **`getDoF()`** = `dof_` = number of joints in the chain(s) the task space spans =
+  **7** for this chain (includes the prismatic torso). Joint limits
+  (`getJointLimitsMin/Max`) and `compute_ee_motor(position)` are all this
+  **`dof_`-width** (7).
+- **`getControlledDoF()`** = number of *controlled* joints = joints targeted by an
+  actuator with control `group > 0` = **6** (the prismatic torso has no such
+  actuator, so it is not controlled). Documented in the header as *"the width of
+  the control Jacobian and command."*
+- **`getControlledJoints()`** = the column indices (into the `dof_`-width vector)
+  that are controlled.
+- **`computeEEGeometricJacobian`** builds the full `dof_`-wide chain Jacobian and
+  then selects exactly the `getControlledJoints()` columns, so it is
+  **6 × controlledDoF** (6 columns), with columns ordered by `getControlledJoints()`.
 
-The chain's first joint (index 0) is a **prismatic torso joint**, range `[0, 0.5]`.
-All 7 joints move the end-effector, but gafro's **geometric (rotor-derivative)
-Jacobian models only the 6 revolute joints (indices 1..6) and omits the prismatic
-joint 0.** Verified:
+So the 6-vs-7 split is **intended and explicit in gafro**: the geometric Jacobian
+is the *control* Jacobian. The bug is that **the gafropy binding exposes only
+`get_dof()` (=7) and omits `get_controlled_dof()` / `get_controlled_joints()`**, so
+the pycbirrt backend sizes `q` and the joint-limit clamp from `get_dof()` (7) while
+`dq = J.T @ ...` comes from the 6-column control Jacobian → `q + dq` is
+`(7,) + (6,)`.
 
-- `J_geo @ dq == log(M_new · M_old⁻¹)` exactly, for a `dq` applied to chain joints 1..6.
-- `J_geo`'s linear rows equal the finite-difference Jacobian's columns 1..6.
-
-So the geometric Jacobian's **column count is the true controllable DOF** for the
-CGA-log error convention the backend already uses, and those columns map to the
-**trailing** chain joints (1..6); the leading joint(s) are not part of this
-task space's controllable set.
+(There are genuinely three DOF concepts — `System::getDoF()` = 30,
+`KinematicChain::getDoF()`, and `TaskSpace::getDoF()` = 7 with its separate
+`getControlledDoF()` = 6. pycbirrt was reading the wrong one and the right one
+wasn't bound.)
 
 ## Design principle
 
-**The task space's geometric Jacobian is the single source of truth for the
-controllable joint set.** The backend derives `dof`, joint limits, the IK update
-`dq`, and the clamp all from the Jacobian's column count — never from
-`get_dof()`. This is what "generic over the task space, not the kinematic chain"
-means concretely: any task space (revolute arm, chain with a passive/prismatic
-joint, and in principle cooperative/primitive task spaces) drives planning at the
-DOF its own Jacobian exposes, with no per-robot configuration.
+Use gafro's own API as the source of truth. Configurations, joint limits, and FK
+are **`dof_`-width**; the planner's search space and the IK update are
+**`controlledDoF`-width**; `getControlledJoints()` is the exact (possibly
+non-contiguous) index map between them. No inference from Jacobian shape, no
+"trailing joints" assumption.
 
 The CBiRRT planner, the `RobotModel`/`IKSolver` Protocols, and `tsr/` are already
-DOF-agnostic — they consume only `dof`, `joint_limits`, `forward_kinematics`, and
-`solve_valid`. They need **no changes**; they follow automatically once the
-backend reports a self-consistent DOF.
+DOF-agnostic (they consume only `dof`, `joint_limits`, `forward_kinematics`,
+`solve_valid`). They need **no changes**; they follow once the backend reports a
+self-consistent DOF.
 
-## Components
+## Part A — gafropy bindings
 
-### 1. Controllable-DOF helper (shared)
+In `src/gafropy/cpp/robots/TaskSpace.cpp`, in the `TaskSpace` base-class block
+(both methods live on the base `gafro::TaskSpace<T>`), add:
 
-A small helper derives, from a `SingleArmTaskSpace`, the consistent triple used by
-both the model and the solver:
+```cpp
+.def("get_controlled_dof", &GTaskSpace::getControlledDoF)
+.def("get_controlled_joints", &GTaskSpace::getControlledJoints)  // vector<int>, indices into the dof_-width config
+```
 
-- `ctrl_dof = compute_ee_geometric_jacobian(q_probe).shape[1]` (probe once with a
-  zero or midpoint config).
-- `full_dof = get_dof()`.
-- `n_fixed = full_dof - ctrl_dof` — the number of leading joints the Jacobian
-  omits (held fixed). The geometric Jacobian omits the **leading** joints, so the
-  controllable joints are the **trailing** `ctrl_dof` entries; verified for this
-  chain (`J_geo` columns == chain joints 1..6). The helper asserts
-  `n_fixed >= 0` and, when `n_fixed == 0`, is a no-op (the common revolute-arm
-  case is unaffected).
-- Controllable joint limits = the **last `ctrl_dof`** entries of
-  `get_joint_limits_min/max()`.
+`<pybind11/stl.h>` is already included, so `std::vector<int>` converts to a Python
+list automatically. Rebuild the wheel (per the gafropy venv memo: reinstall the
+wheel, don't CMake-install over system paths). Verify from Python:
+`get_controlled_dof() == 6`, `get_controlled_joints() == [1,2,3,4,5,6]`,
+`len(get_joint_limits_min()) == 7`, and
+`compute_ee_geometric_jacobian(zeros(7)).shape == (6, 6)`.
 
-A pair of converters bridges controllable-space and full-chain space:
+## Part B — pycbirrt gafro backend
 
-- `to_full(q_ctrl, fixed)` → length-`full_dof` vector with the leading `n_fixed`
-  entries taken from `fixed` and the trailing `ctrl_dof` from `q_ctrl`.
-- `to_ctrl(q_full)` → the trailing `ctrl_dof` entries.
+### B1. Controlled-joint helper (shared by model + solver)
 
-`compute_ee_motor` and `compute_ee_geometric_jacobian` are always called with the
-full-chain vector.
+From a `SingleArmTaskSpace`, derive:
 
-### 2. `GafroIKSolver` — operate in controllable space
+- `full_dof = get_dof()` (e.g. 7) — width of configs, limits, and FK input.
+- `ctrl_idx = list(get_controlled_joints())` (e.g. `[1,2,3,4,5,6]`) — columns the
+  geometric Jacobian drives, in Jacobian-column order.
+- `ctrl_dof = get_controlled_dof()` (== `len(ctrl_idx)`, e.g. 6) — the DOF the
+  planner plans in.
+- Controlled joint limits = `full_limits[ctrl_idx]` for min and max (fancy-indexed
+  in `ctrl_idx` order so they line up with Jacobian columns and `dq`).
 
-- `self._dof` = `ctrl_dof` (from the Jacobian), not `get_dof()`.
-- `self.joint_limits` = controllable limits (trailing `ctrl_dof`).
-- The non-controlled (leading) joints are **held fixed** at the value supplied via
-  `q_init` (if `q_init` has full length, its leading entries are the hold values;
-  if it has controllable length or is `None`, the hold values default to the
-  controllable-limit-midpoint-padded base / zeros). This matches the agreed
-  behavior: IK only moves the task space's joints; the prismatic torso is a fixed
-  mounting offset for this task space.
-- Iteration: `q` is length `ctrl_dof`; each step rebuilds the full vector via
-  `to_full` for FK and Jacobian, computes the 6-vector `error` and the
-  `ctrl_dof`-length `dq`, and `q + dq` now matches. `_clamp_to_limits` clamps in
-  controllable space.
-- Return values stay length `ctrl_dof` (the DOF the planner plans in). `solve_valid`
-  limit-checks against the controllable limits.
+Converters between the two widths:
 
-### 3. `GafroRobotModel` — consistent adapter (kept, not deleted)
+- `to_full(q_ctrl, base_full)` → copy `base_full` (length `full_dof`), then
+  `full[ctrl_idx] = q_ctrl`. `base_full` carries the held values of the
+  non-controlled joints.
+- `to_ctrl(q_full)` → `q_full[ctrl_idx]`.
 
-`GafroRobotModel` remains a thin `RobotModel` adapter because the example uses
-`.system` / `.mesh_root` / `.manipulator` for the viewer, and the planner expects
-the Protocol shape. It is made consistent with the solver:
+`compute_ee_motor` and `compute_ee_geometric_jacobian` are always called with a
+`full_dof` vector. Fast path: when `ctrl_dof == full_dof` and
+`ctrl_idx == range(full_dof)` (every revolute arm today), both converters are
+identities and behavior is unchanged.
 
-- `.dof` → `ctrl_dof` (via the shared helper), not `get_dof()`.
-- `.joint_limits` → controllable limits.
-- `.forward_kinematics(q)` accepts a controllable-length `q`, rebuilds the
-  full-chain vector with the fixed leading joints held at their base value, and
-  returns the `Motor`.
+### B2. `GafroIKSolver` — iterate in controlled space
 
-The fixed-joint base value for the model defaults to the controllable picture's
-implied zeros for the leading joints (the torso at its lower limit / supplied
-base); FK is unaffected for `n_fixed == 0` robots.
+- `self._dof = ctrl_dof`; `self.joint_limits` = controlled limits.
+- The non-controlled joints are **held fixed** at the value implied by `q_init`:
+  if `q_init` is `full_dof`-length, its values seed `base_full` (so the torso stays
+  where the caller put it); if `q_init` is `ctrl_dof`-length or `None`, `base_full`
+  defaults to the full-limit midpoint (torso at mid-range) and `q` starts from the
+  controlled midpoint.
+- Each iteration: `q_full = to_full(q, base_full)`; `current =
+  compute_ee_motor(q_full)`; `error = log(target · current⁻¹)` (6-vec, unchanged);
+  `J = compute_ee_geometric_jacobian(q_full)` (6 × ctrl_dof); damped-LS `dq` is
+  length `ctrl_dof`; `q = clamp(q + dq)` now matches. Returns `ctrl_dof`-length
+  configs.
+- `solve_valid` limit-checks against controlled limits.
 
-### 4. Example (`franka_tsr_interactive.py`)
+### B3. `GafroRobotModel` — consistent adapter (kept)
 
-- `START_Q` and `angular_joints` are sized to `robot.dof` (now `ctrl_dof`) instead
-  of hardcoded 7. `START_Q` becomes the controllable-DOF start (the trailing
-  revolute joints).
-- `_pad(q, system.get_dof())` continues to expand a controllable config to the
-  full **system** vector for the visualizer; it already zero-pads, so the only
-  change is that it now receives a `ctrl_dof`-length `q`. The mapping of
-  controllable joints into the right system slots for the viewer is handled by the
-  model's full-chain reconstruction where the viewer needs FK; the raw
-  `robot_viz.update` path keeps using `_pad` against the system DOF.
+Kept as the `RobotModel` adapter (the example uses `.system` / `.mesh_root` /
+`.manipulator` for the viewer). Made consistent via the same helper:
+
+- `.dof` → `ctrl_dof`; `.joint_limits` → controlled limits.
+- `.forward_kinematics(q)` accepts a `ctrl_dof`-length `q`, expands via
+  `to_full(q, base_full)` with the held non-controlled joints, returns the `Motor`.
+  The model's `base_full` defaults to the full-limit midpoint (documented), so the
+  torso has a defined pose for FK/viz.
+
+### B4. Example (`franka_tsr_interactive.py`)
+
+- `START_Q` and `angular_joints` sized to `robot.dof` (now `ctrl_dof`); `START_Q`
+  is the controlled-joint start.
+- `_pad(q, system.get_dof())` still expands to the full **System** width for the
+  viewer; it now receives a `ctrl_dof`-length `q`. Where the viewer needs the
+  arm's pose it goes through the model's FK (full-chain reconstruction); the raw
+  `robot_viz.update` keeps zero-padding against system DOF as today.
 
 ## Error handling
 
-- The helper asserts `ctrl_dof <= full_dof`. If a future task space exposes a
-  Jacobian with *more* columns than `get_dof()` (not expected), it raises a clear
-  `ValueError` rather than silently mis-slicing.
-- `n_fixed == 0` (every revolute arm today) is an explicit fast path: `to_full` /
-  `to_ctrl` are identities, so existing single-arm robots behave exactly as before.
+- The helper asserts `ctrl_dof == len(ctrl_idx)` and `max(ctrl_idx) < full_dof`;
+  mismatch raises a clear `ValueError` (guards against a stale/partial binding).
+- `ctrl_dof == full_dof` with identity `ctrl_idx` is an explicit fast path, so
+  existing revolute-arm robots are byte-for-byte unaffected.
 
 ## Testing
 
-1. **Regression (the crash):** plan the `geodude.xml` `left_ur5e/endeffector_link`
-   chain to a TSR; assert no broadcast error and that a path of `ctrl_dof`-width
-   waypoints is returned (`--no-viz` path of the example).
-2. **DOF consistency:** assert `solver._dof == model.dof ==
-   compute_ee_geometric_jacobian(probe).shape[1]` and that `len(joint_limits[0])`
-   matches.
-3. **`J @ dq == error`:** unit-check that one damped-LS step's `J @ dq` reproduces
-   the CGA log error twist (guards the convention the fix relies on).
-4. **No regression for revolute arms:** a plain 6/7-DOF arm chain
-   (`n_fixed == 0`) still solves IK and plans, with identity controllable/full
-   mapping.
-5. **Fixed-joint hold:** after IK, the reconstructed full config's leading joints
-   equal the supplied base (the torso did not move).
+1. **Binding smoke test (gafropy):** `get_controlled_dof() == 6`,
+   `get_controlled_joints() == [1,2,3,4,5,6]`, geometric Jacobian is `(6,6)`,
+   joint limits length 7.
+2. **Regression (the crash):** plan the `geodude.xml` `left_ur5e/endeffector_link`
+   chain to a TSR (`--no-viz`); assert no broadcast error and a path of
+   `ctrl_dof`-width waypoints.
+3. **DOF consistency:** `solver._dof == model.dof == get_controlled_dof() ==
+   geometric_jacobian.shape[1]`; controlled-limit length matches.
+4. **`J @ dq == error`:** one damped-LS step's `J @ dq` reproduces the CGA log
+   error twist (guards the convention).
+5. **No regression for revolute arms:** a plain 6/7-DOF arm where
+   `ctrl_idx == range(dof)` solves IK and plans with identity mapping.
+6. **Fixed-joint hold:** after IK, `to_full(result, base_full)`'s non-controlled
+   entries equal `base_full` (the torso did not move).
 
 ## Out of scope
 
 - No changes to `planner.py`, the Protocols, `tsr/`, or other backends
   (`mujoco.py`, `eaik.py`).
-- No gafro-side change to make the geometric Jacobian include the prismatic joint;
-  the prismatic joint is intentionally held fixed for this task space.
-- No new task-space-as-explicit-API-parameter surface across pycbirrt/tsr.
+- No gafro C++ change — `getControlledDoF`/`getControlledJoints` already exist; we
+  only bind them.
+- No task-space-as-explicit-API-parameter surface across pycbirrt/tsr.
