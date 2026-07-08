@@ -6,7 +6,8 @@ import time
 from dataclasses import dataclass
 
 import numpy as np
-from tsr import TSR, choose_tsr_index
+from gafropy import Motor
+from tsr import Constraint, TSR, choose_tsr_index
 from tsr.sampling import sample_from_tsrs
 
 from pycbirrt.config import CBiRRTConfig
@@ -86,7 +87,11 @@ class CBiRRT:
                 )
 
         self._rng = np.random.default_rng()
-        self._constraint_tsrs: list[TSR] | None = None
+        # Path constraints are queried only through the Constraint seam
+        # (distance / to_transform), so any Constraint works — TSR or a geometric
+        # primitive such as PlaneConstraint. Start/goal regions additionally need
+        # volume-weighted sampling (.sample + .Bw), which today only TSR provides.
+        self._constraint_tsrs: list[Constraint] | None = None
         self._start_tsrs: list[TSR] | None = None
         self._goal_tsrs: list[TSR] | None = None
 
@@ -96,7 +101,7 @@ class CBiRRT:
         goal: np.ndarray | list[np.ndarray] | None = None,
         goal_tsrs: list[TSR] | None = None,
         start_tsrs: list[TSR] | None = None,
-        constraint_tsrs: list[TSR] | None = None,
+        constraint_tsrs: list[Constraint] | None = None,
         seed: int | None = None,
         return_details: bool = False,
     ) -> list[np.ndarray] | None | PlanResult:
@@ -364,7 +369,9 @@ class CBiRRT:
         if self._constraint_tsrs is None:
             return True
 
-        pose = self.robot.forward_kinematics(q)
+        # Normalize FK output to a Motor so backends may return either a Motor
+        # or a 4x4 matrix; tsr.distance accepts a Motor natively.
+        pose = Motor(self.robot.forward_kinematics(q))
         for tsr in self._constraint_tsrs:
             dist, _ = tsr.distance(pose)
             if dist > self.config.tsr_tolerance:
@@ -529,8 +536,8 @@ class CBiRRT:
         prev_dist = float("inf")
 
         for _ in range(self.config.max_projection_iters):
-            # Get current end-effector pose
-            pose = self.robot.forward_kinematics(q_current)
+            # Get current end-effector pose (normalized to a Motor)
+            pose = Motor(self.robot.forward_kinematics(q_current))
 
             # Find the TSR with the largest violation
             max_dist = 0.0
@@ -552,10 +559,11 @@ class CBiRRT:
                 return None  # Not converging
             prev_dist = max_dist
 
-            # Project pose onto the worst TSR using bwopt (handles both position and orientation)
-            # bwopt is the closest point in Bw space (xyzrpy) to the current pose
-            # xyzrpy_to_trans converts it back to a 4x4 transform in the TSR's frame
-            projected_pose = worst_tsr.xyzrpy_to_trans(worst_bwopt)
+            # Project pose onto the worst TSR using bwopt (handles both position and orientation).
+            # bwopt is the closest point in the TSR's split Bw coords to the current pose;
+            # to_transform maps it to the full world-frame end-effector Motor (T0_w * Tw * Tw_e),
+            # the same pose space as forward_kinematics, so it flows straight to the IK solver.
+            projected_pose = worst_tsr.to_transform(worst_bwopt)
 
             # Solve IK for the projected pose (pass q_current as hint for iterative solvers)
             solutions = self.ik.solve(projected_pose, q_init=q_current)

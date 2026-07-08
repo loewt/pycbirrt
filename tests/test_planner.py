@@ -5,6 +5,7 @@
 
 import numpy as np
 import pytest
+from gafropy import Motor
 from tsr import TSR
 
 from pycbirrt import AllStartConfigurationsInCollision, CBiRRT, CBiRRTConfig
@@ -63,6 +64,7 @@ class MockIKSolver:
 
         Note: q_init is ignored (analytical solver finds all solutions).
         """
+        pose = Motor(pose).to_transformation_matrix()  # accept a gafropy.Motor or a 4x4 matrix
         x, y = pose[0, 3], pose[1, 3]
         d = np.sqrt(x**2 + y**2)
 

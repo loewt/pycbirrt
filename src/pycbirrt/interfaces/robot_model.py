@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Siddhartha Srinivasa
 
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from gafropy import Motor
 
 
 class RobotModel(Protocol):
@@ -19,13 +22,15 @@ class RobotModel(Protocol):
         """Joint limits as (lower, upper) bounds arrays."""
         ...
 
-    def forward_kinematics(self, q: np.ndarray) -> np.ndarray:
+    def forward_kinematics(self, q: np.ndarray) -> "Motor":
         """Compute end-effector pose from joint configuration.
 
         Args:
             q: Joint configuration array of shape (dof,)
 
         Returns:
-            4x4 homogeneous transform of end-effector in world frame
+            End-effector pose in the world frame as a ``gafropy.Motor``.
+            (The planner also tolerates a 4x4 homogeneous transform, which it
+            normalizes via the ``gafropy.Motor`` constructor, but Motor is the contract.)
         """
         ...
