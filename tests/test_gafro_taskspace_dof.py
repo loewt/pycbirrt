@@ -171,8 +171,12 @@ def test_plan_to_tsr_end_to_end():
 
 def _to_full(manipulator, q_ctrl):
     ctrl_idx = np.asarray(manipulator.get_controlled_joints(), dtype=int)
-    lower = np.asarray(manipulator.get_joint_limits_min(), dtype=float)
-    upper = np.asarray(manipulator.get_joint_limits_max(), dtype=float)
+    # Joint limits are System-level now; map them to task (full chain) width.
+    system = manipulator.get_system()
+    lower = np.asarray(
+        manipulator.extract_configuration(system.get_joint_limits_min()), dtype=float)
+    upper = np.asarray(
+        manipulator.extract_configuration(system.get_joint_limits_max()), dtype=float)
     full = 0.5 * (lower + upper)
     full[ctrl_idx] = q_ctrl
     return full

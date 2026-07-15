@@ -152,8 +152,7 @@ def visualize(robot, constraint, path, constraint_kind, port: int):
     system = robot.system
 
     viz = ga.Visualizer(port=port)
-    franka = viz.add_robot(system, mesh_root=robot.mesh_root,
-                           joint_sliders=False)  # config is driven by playback
+    franka = viz.add_robot(system, joint_sliders=False)  # config is driven by playback
 
     # The constraint primitive is interactive: drag/resize it to see where it sits.
     ee = np.array([_ee_xyz(robot, q) for q in path])

@@ -127,9 +127,7 @@ def visualize(planner: TSRPlanner, port: int):
     system = planner.robot.system  # same System the planner does its math on
 
     viz = ga.Visualizer(port=port)
-    print(planner.robot.mesh_root)
-    robot_viz = viz.add_robot(system, mesh_root=planner.robot.mesh_root,
-                              joint_sliders=False)  # driven by playback
+    robot_viz = viz.add_robot(system, joint_sliders=False)  # driven by playback
 
     # The TSR frame (drawn once) and the region box (resized on every replan),
     # both placed at the planner's reachable reference pose.

@@ -15,7 +15,6 @@ injected :class:`~pycbirrt.interfaces.collision_checker.CollisionChecker`
 (e.g. ``MuJoCoCollisionChecker``).
 """
 
-import os
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -47,8 +46,7 @@ class GafroRobotModel:
     e.g., drive a ``Visualizer`` from the same model without reloading it.
     """
 
-    def __init__(self, system: "System", chain_name: str | None = None,
-                 mesh_root: str | None = None):
+    def __init__(self, system: "System", chain_name: str | None = None):
         if chain_name is None:
             chain_names = system.get_kinematic_chain_names()
             if not chain_names:
@@ -56,17 +54,20 @@ class GafroRobotModel:
             chain_name = chain_names[-1]
         self.system = system
         self.chain_name = chain_name
-        # Base directory the system's relative visual-mesh paths resolve against
-        # (consumed by ``gafropy.Visualizer.add_robot(mesh_root=...)``).
-        self.mesh_root = mesh_root
         self.manipulator = SingleArmTaskSpace(system, chain_name, chain_name)
         # A task space reports a full chain DOF (configs / limits / FK input) and a
         # narrower *controlled* DOF (the width of its control Jacobian). Planning
         # happens in the controlled width; the non-controlled joints (e.g. a
         # prismatic torso) are held at the limit midpoint for FK / visualization.
         self._ctrl_idx = np.asarray(self.manipulator.get_controlled_joints(), dtype=int)
-        full_lower = np.asarray(self.manipulator.get_joint_limits_min(), dtype=float)
-        full_upper = np.asarray(self.manipulator.get_joint_limits_max(), dtype=float)
+        # Joint limits live on the System now (a task space no longer carries its
+        # own). extract_configuration gathers this chain's joints out of the
+        # System-width limit vectors, giving the full task-width limits _ctrl_idx
+        # indexes into -- same system->task mapping used for _task_to_system below.
+        full_lower = np.asarray(
+            self.manipulator.extract_configuration(system.get_joint_limits_min()), dtype=float)
+        full_upper = np.asarray(
+            self.manipulator.extract_configuration(system.get_joint_limits_max()), dtype=float)
         self._lower = full_lower[self._ctrl_idx]
         self._upper = full_upper[self._ctrl_idx]
         self._base_full = 0.5 * (full_lower + full_upper)
@@ -83,17 +84,12 @@ class GafroRobotModel:
             system.get_default_configuration(), dtype=float)
 
     @classmethod
-    def from_file(cls, path: str, chain_name: str | None = None,
-                  mesh_root: str | None = None) -> "GafroRobotModel":
+    def from_file(cls, path: str, chain_name: str | None = None) -> "GafroRobotModel":
         """Load a robot description (URDF / MJCF / YAML) and wrap one of its chains.
 
         If ``chain_name`` is omitted, the system's last kinematic chain is used.
-        ``mesh_root`` defaults to the description's own directory, which is where
-        its relative visual-mesh paths resolve.
         """
-        if mesh_root is None:
-            mesh_root = os.path.dirname(os.path.abspath(path))
-        return cls(SystemSerialization.load(path), chain_name, mesh_root)
+        return cls(SystemSerialization.load(path), chain_name)
 
     # Back-compat alias; ``from_file`` is the generic name (loads URDF or MJCF).
     from_urdf = from_file
@@ -178,8 +174,14 @@ class GafroIKSolver:
         # controlled vector into a full-width base via the controlled-joint index.
         self._ctrl_idx = np.asarray(manipulator.get_controlled_joints(), dtype=int)
         self._dof = manipulator.get_controlled_dof()
-        full_lower = np.asarray(manipulator.get_joint_limits_min(), dtype=float)
-        full_upper = np.asarray(manipulator.get_joint_limits_max(), dtype=float)
+        # Joint limits are System-level now; extract_configuration maps the
+        # System-width limit vectors down to this task space's full chain width
+        # (what _ctrl_idx indexes into).
+        system = manipulator.get_system()
+        full_lower = np.asarray(
+            manipulator.extract_configuration(system.get_joint_limits_min()), dtype=float)
+        full_upper = np.asarray(
+            manipulator.extract_configuration(system.get_joint_limits_max()), dtype=float)
         self._mid_full = 0.5 * (full_lower + full_upper)
 
         if joint_limits is None:
