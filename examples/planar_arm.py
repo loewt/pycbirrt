@@ -50,6 +50,9 @@ class PlanarArmRobot:
         T[1, 3] = y
         return T
 
+    def normalize_pose(self, x) -> Motor:
+        return Motor(x)
+
     def get_joint_positions(self, q: np.ndarray) -> list[np.ndarray]:
         """Get positions of base, elbow, and end-effector for visualization."""
         base = np.array([0.0, 0.0])

@@ -81,6 +81,13 @@ class MuJoCoRobotModel:
     def joint_limits(self) -> tuple[np.ndarray, np.ndarray]:
         return self._lower, self._upper
 
+    def normalize_pose(self, x) -> "Motor":
+        """Coerce a forward-kinematics / TSR pose to a ``Motor``.
+
+        Single-arm pose token, matching ``GafroRobotModel.normalize_pose``.
+        """
+        return Motor(x)
+
     def forward_kinematics(self, q: np.ndarray) -> "Motor":
         """Compute end-effector pose from joint configuration.
 

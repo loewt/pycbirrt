@@ -6,7 +6,6 @@ import time
 from dataclasses import dataclass
 
 import numpy as np
-from gafropy import Motor
 from tsr import Constraint, TSR, choose_tsr_index
 from tsr.sampling import sample_from_tsrs
 
@@ -369,9 +368,9 @@ class CBiRRT:
         if self._constraint_tsrs is None:
             return True
 
-        # Normalize FK output to a Motor so backends may return either a Motor
-        # or a 4x4 matrix; tsr.distance accepts a Motor natively.
-        pose = Motor(self.robot.forward_kinematics(q))
+        # Normalize FK output through the model's pose token (Motor for
+        # single-arm, BimanualPose for bimanual); tsr.distance accepts either.
+        pose = self.robot.normalize_pose(self.robot.forward_kinematics(q))
         for tsr in self._constraint_tsrs:
             dist, _ = tsr.distance(pose)
             if dist > self.config.tsr_tolerance:
@@ -536,8 +535,8 @@ class CBiRRT:
         prev_dist = float("inf")
 
         for _ in range(self.config.max_projection_iters):
-            # Get current end-effector pose (normalized to a Motor)
-            pose = Motor(self.robot.forward_kinematics(q_current))
+            # Get current end-effector pose (normalized via the model's pose token)
+            pose = self.robot.normalize_pose(self.robot.forward_kinematics(q_current))
 
             # Find the TSR with the largest violation
             max_dist = 0.0

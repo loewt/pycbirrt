@@ -37,6 +37,9 @@ class MockRobotModel:
         T[1, 3] = y
         return T
 
+    def normalize_pose(self, x) -> Motor:
+        return Motor(x)
+
 
 class MockCollisionChecker:
     """Always returns valid (no obstacles)."""

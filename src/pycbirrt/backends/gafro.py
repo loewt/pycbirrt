@@ -102,6 +102,16 @@ class GafroRobotModel:
     def joint_limits(self) -> tuple[np.ndarray, np.ndarray]:
         return self._lower, self._upper
 
+    def normalize_pose(self, x) -> "Motor":
+        """Coerce a forward-kinematics / TSR pose to a ``Motor``.
+
+        This is the single-arm pose token. It moves the ``Motor(...)`` coercion
+        the planner used to do inline into the model, so the planner can stay
+        pose-shape-agnostic (a bimanual model returns a BimanualPose instead).
+        """
+        from gafropy import Motor
+        return Motor(x)
+
     def forward_kinematics(self, q: np.ndarray) -> "Motor":
         """End-effector pose as a ``gafropy.Motor`` (no matrix round-trip).
 
