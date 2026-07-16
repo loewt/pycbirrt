@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from tsr import Constraint, TSR, choose_tsr_index
+from tsr.bimanual import BimanualPose
 from tsr.sampling import sample_from_tsrs
 
 from pycbirrt.config import CBiRRTConfig
@@ -20,6 +21,25 @@ from pycbirrt.interfaces import CollisionChecker, IKSolver, RobotModel
 from pycbirrt.tree import RRTree
 
 logger = logging.getLogger(__name__)
+
+
+def _merge_bimanual_poses(primary, secondary):
+    """Fold ``secondary``'s set component into ``primary`` wherever ``primary``
+    leaves it unset (``None``).
+
+    A goal-region TSR and a path-constraint TSR are typically defined over
+    disjoint components (e.g. absolute vs. relative for a bimanual pose), so
+    their samples can be solved as a single combined IK target instead of
+    solving the goal alone and rejecting it after the fact if the constraint
+    happens not to hold. A no-op for pose types (e.g. a plain single-arm
+    Motor) that don't decompose this way.
+    """
+    if not isinstance(primary, BimanualPose) or not isinstance(secondary, BimanualPose):
+        return primary
+    return BimanualPose(
+        absolute=primary.absolute if primary.absolute is not None else secondary.absolute,
+        relative=primary.relative if primary.relative is not None else secondary.relative,
+    )
 
 
 @dataclass
@@ -291,6 +311,9 @@ class CBiRRT:
         """
         for _ in range(self.config.tsr_samples):
             pose = sample_from_tsrs(tsrs, self._rng)
+            if must_satisfy_constraints and self._constraint_tsrs:
+                for constraint_tsr in self._constraint_tsrs:
+                    pose = _merge_bimanual_poses(pose, constraint_tsr.sample())
             solutions = self.ik.solve_valid(pose)
 
             for q in solutions:
@@ -331,6 +354,9 @@ class CBiRRT:
 
             tsr_idx = choose_tsr_index(tsrs, self._rng)
             pose = tsrs[tsr_idx].sample()
+            if must_satisfy_constraints and self._constraint_tsrs:
+                for constraint_tsr in self._constraint_tsrs:
+                    pose = _merge_bimanual_poses(pose, constraint_tsr.sample())
             solutions = self.ik.solve_valid(pose)
 
             if not solutions:

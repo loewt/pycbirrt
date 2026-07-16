@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Native gafropy bimanual backend: CooperativeTaskSpace kinematics + IK.
+"""Native gafropy bimanual backend: DualArmTaskSpace kinematics + IK.
 
 Forward kinematics returns a :class:`~tsr.bimanual.BimanualPose` — the
 (absolute, relative) pose pair a :class:`~tsr.bimanual.BimanualTSR` speaks in.
@@ -11,52 +11,40 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
-from gafropy import CooperativeTaskSpace, SystemSerialization
+from gafropy import DualArmTaskSpace, SystemSerialization
+from scipy.optimize import least_squares
 
-from pycbirrt.backends.gafro import _ee_error_twist
 from tsr.bimanual import BimanualPose
 
 if TYPE_CHECKING:
     from gafropy import System
 
 
-def _discover_chains(system) -> tuple[str, str]:
-    names = system.get_kinematic_chain_names()
-    left = next((c for c in names if "left" in c.lower()), None)
-    right = next((c for c in names if "right" in c.lower()), None)
-    if left is None or right is None:
-        raise ValueError(
-            f"could not auto-discover left/right chains from {names}; "
-            "pass left_chain / right_chain explicitly")
-    return left, right
-
-
 class GafroBimanualModel:
-    """Dual-arm kinematics over a gafro CooperativeTaskSpace."""
+    """Dual-arm kinematics over a gafro DualArmTaskSpace."""
 
-    def __init__(self, system: "System", left_chain: str | None = None, right_chain: str | None = None):
-        if left_chain is None or right_chain is None:
-            dl, dr = _discover_chains(system)
-            left_chain = left_chain or dl
-            right_chain = right_chain or dr
+    def __init__(self, system: "System", task_space_name):
         self.system = system
-        self.left_chain = left_chain
-        self.right_chain = right_chain
-        self.cooperative = CooperativeTaskSpace(system, "coop", [left_chain, right_chain])
+        self.cooperative = system.get_task_space(task_space_name)
 
-        self._ctrl_idx = np.asarray(self.cooperative.get_controlled_joints(), dtype=int)
-        ts = self.cooperative
-        full_lower = np.asarray(ts.extract_configuration(system.get_joint_limits_min()), dtype=float)
-        full_upper = np.asarray(ts.extract_configuration(system.get_joint_limits_max()), dtype=float)
-        self._lower = full_lower[self._ctrl_idx]
-        self._upper = full_upper[self._ctrl_idx]
-        self._base_full = 0.5 * (full_lower + full_upper)
-        self.default_system_configuration = np.asarray(
-            system.get_default_configuration(), dtype=float)
+        self._ctrl_idx = np.asarray(
+            self.cooperative.get_controlled_joint_indices(), dtype=int)
+
+        self._lower = np.asarray(system.get_joint_limits_min(), dtype=float)
+        self._upper = np.asarray(system.get_joint_limits_max(), dtype=float)
+
+        # The URDF/YAML-declared rest pose can sit fractions of a radian outside its
+        # own declared limits (rounding in the robot description, e.g. gripper
+        # joints on this rig) -- clamp so anything seeded from it (IK's default
+        # init, a planner root) is actually valid, not silently poisoned from the start.
+        self.default_system_configuration = np.clip(
+            np.asarray(system.get_default_configuration(), dtype=float),
+            self._lower, self._upper,
+        )
 
     @classmethod
-    def from_file(cls, path: str, left_chain: str | None = None, right_chain: str | None = None) -> "GafroBimanualModel":
-        return cls(SystemSerialization.load(path), left_chain, right_chain)
+    def from_file(cls, path: str, task_space_name) -> "GafroBimanualModel":
+        return cls(SystemSerialization.load(path), task_space_name)
 
     @property
     def dof(self) -> int:
@@ -66,17 +54,12 @@ class GafroBimanualModel:
     def joint_limits(self) -> tuple[np.ndarray, np.ndarray]:
         return self._lower, self._upper
 
-    def _to_task_full(self, q: np.ndarray) -> np.ndarray:
-        """Controlled-width ``q`` -> full task-width config (non-controlled held)."""
-        q_full = self._base_full.copy()
-        q_full[self._ctrl_idx] = np.asarray(q, dtype=float)
-        return q_full
-
     def forward_kinematics(self, q: np.ndarray) -> BimanualPose:
-        q_full = self._to_task_full(q)
+        [a, r] = self.cooperative.compute_task_space_motors(q)
+
         return BimanualPose(
-            absolute=self.cooperative.compute_absolute_motor(q_full),
-            relative=self.cooperative.compute_relative_motor(q_full),
+            absolute=a,
+            relative=r,
         )
 
     def normalize_pose(self, x) -> BimanualPose:
@@ -87,27 +70,43 @@ class GafroBimanualModel:
 
 
 class GafroBimanualIKSolver:
-    """Adaptive differential IK for a bimanual target.
+    """Differential IK for a bimanual target, solved with SciPy's trust-region
+    least squares (``scipy.optimize.least_squares``, method ``"trf"``).
 
-    Each iteration stacks only the geometric Jacobians of the pose components
-    present in the target (absolute, relative, or both), and drives the CGA
-    error twist(s) to zero with damped least squares over the joined dual-arm
-    joint vector.
+    The residual stacks the CGA error twist(s) of whichever pose components
+    are present in the target (absolute, relative, or both); the Jacobian is
+    the matching stack of gafro's analytic geometric Jacobians, supplied to
+    the solver directly rather than finite-differenced. ``"trf"`` also
+    respects the joint limits natively, so solutions never need clamping.
     """
 
     def __init__(self, model: "GafroBimanualModel", collision_checker=None,
-                 damping: float = 0.1, max_iterations: int = 200, tolerance: float = 1e-3):
+                 max_iterations: int = 200, tolerance: float = 1e-3):
         self.model = model
         self.coop = model.cooperative
         self._ctrl_idx = model._ctrl_idx
-        self.damping = damping
         self.max_iterations = max_iterations
         self.tolerance = tolerance
         self.collision_checker = collision_checker
 
-    def _clamp(self, q: np.ndarray) -> np.ndarray:
-        lower, upper = self.model.joint_limits
-        return np.clip(q, lower, upper)
+    def _residual_and_jacobian(self, target: BimanualPose, q: np.ndarray):
+        errors = []
+        jacobians = []
+        if target.absolute is not None:
+            current = self.coop.compute_absolute_motor(q)
+            errors.append(np.asarray(
+                current.inverse().multiply(target.absolute).log(), dtype=float))
+            jacobians.append(np.asarray(
+                self.coop.compute_absolute_geometric_jacobian(q), dtype=float))
+
+        if target.relative is not None:
+            current = self.coop.compute_relative_motor(q)
+            errors.append(np.asarray(
+                current.inverse().multiply(target.relative).log(), dtype=float))
+            jacobians.append(np.asarray(
+                self.coop.compute_relative_geometric_jacobian(q), dtype=float))
+
+        return np.concatenate(errors), np.vstack(jacobians)
 
     def solve(self, target: BimanualPose, q_init: np.ndarray | None = None) -> list[np.ndarray]:
         if target.absolute is None and target.relative is None:
@@ -117,42 +116,45 @@ class GafroBimanualIKSolver:
         if q_init is not None:
             q = np.asarray(q_init, dtype=float).copy()
         else:
-            q = 0.5 * (lower + upper)
+            # The joint-limit midpoint (all-zero for this rig) is a poor seed for a
+            # coupled 12-DOF bimanual target -- it's often near-singular for one arm
+            # or the other. The model's declared rest pose is a real, reachable
+            # configuration, so it converges far more reliably as a default.
+            q = self.model.default_system_configuration.copy()
 
-        for _ in range(self.max_iterations):
-            q_full = self.model._to_task_full(q)
+        # error(q) = current(q)^-1 * target, so d(error)/dq = -geometric_jacobian(q).
+        def residual(q_ctrl):
+            q[self._ctrl_idx] = q_ctrl
+            error, _ = self._residual_and_jacobian(target, q)
+            return error
 
-            errors = []
-            jacobians = []
-            if target.absolute is not None:
-                current = self.coop.compute_absolute_motor(q_full)
-                errors.append(_ee_error_twist(target.absolute, current))
-                J = np.asarray(self.coop.compute_absolute_geometric_jacobian(q_full), dtype=float)
-                jacobians.append(J[:, self._ctrl_idx])
-            if target.relative is not None:
-                current = self.coop.compute_relative_motor(q_full)
-                errors.append(_ee_error_twist(target.relative, current))
-                J = np.asarray(self.coop.compute_relative_geometric_jacobian(q_full), dtype=float)
-                jacobians.append(J[:, self._ctrl_idx])
+        def jacobian(q_ctrl):
+            q[self._ctrl_idx] = q_ctrl
+            _, J = self._residual_and_jacobian(target, q)
+            return -J
 
-            error = np.concatenate(errors)
-            if np.linalg.norm(error) < self.tolerance:
-                return [q]
+        result = least_squares(
+            residual, q[self._ctrl_idx], jac=jacobian,
+            bounds=(lower[self._ctrl_idx], upper[self._ctrl_idx]),
+            method="trf", max_nfev=self.max_iterations,
+        )
 
-            J = np.vstack(jacobians)  # (6 or 12) x controlled-dof
-            JJT = J @ J.T
-            damped = JJT + self.damping**2 * np.eye(JJT.shape[0])
-            dq = J.T @ np.linalg.solve(damped, error)
-            q = self._clamp(q + dq)
+        if np.linalg.norm(result.fun) >= self.tolerance:
+            return []
 
-        return []
+        q[self._ctrl_idx] = result.x
+        return [q]
 
     def solve_valid(self, target: BimanualPose, q_init: np.ndarray | None = None) -> list[np.ndarray]:
         solutions = self.solve(target, q_init)
         valid = []
         lower, upper = self.model.joint_limits
+        ctrl = self._ctrl_idx
         for q in solutions:
-            if not (np.all(q >= lower - 1e-6) and np.all(q <= upper + 1e-6)):
+            # Only the controlled joints are IK's to answer for; the rest carry
+            # whatever the seed configuration held (e.g. gripper joints), which
+            # `solve()` never touches and shouldn't be re-validated here.
+            if not (np.all(q[ctrl] >= lower[ctrl] - 1e-6) and np.all(q[ctrl] <= upper[ctrl] + 1e-6)):
                 continue
             if self.collision_checker is not None and not self.collision_checker.is_valid(q):
                 continue
