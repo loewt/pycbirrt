@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Protocol
 import numpy as np
 
 if TYPE_CHECKING:
-    from gafropy import Motor
+    from gafro import Motor
 
 
 class IKSolver(Protocol):
@@ -21,7 +21,7 @@ class IKSolver(Protocol):
         """Solve IK for a single end-effector pose (raw, unvalidated).
 
         Args:
-            pose: Desired end-effector pose as a ``gafropy.Motor``
+            pose: Desired end-effector pose as a ``gafro.Motor``
                 (a 4x4 homogeneous transform is also accepted).
             q_init: Optional initial configuration hint for iterative solvers.
                 Analytical solvers may ignore this parameter.
@@ -39,7 +39,7 @@ class IKSolver(Protocol):
         - Collision-free
 
         Args:
-            pose: Desired end-effector pose as a ``gafropy.Motor``
+            pose: Desired end-effector pose as a ``gafro.Motor``
                 (a 4x4 homogeneous transform is also accepted).
             q_init: Optional initial configuration for iterative solvers
 

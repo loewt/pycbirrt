@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
 import os
+
 import numpy as np
 import pytest
 
@@ -34,8 +35,9 @@ def test_both_active_recovers_configuration(model):
 
 @requires_robot
 def test_relative_only_ignores_absolute(model):
-    from pycbirrt.backends.gafro_bimanual import GafroBimanualIKSolver
     from tsr.bimanual import BimanualPose
+
+    from pycbirrt.backends.gafro_bimanual import GafroBimanualIKSolver
     rng = np.random.default_rng(1)
     lower, upper = model.joint_limits
     q_true = lower + (upper - lower) * rng.random(model.dof)

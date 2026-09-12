@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Native gafropy bimanual backend: DualArmTaskSpace kinematics + IK.
+"""Native gafro bimanual backend: DualArmTaskSpace kinematics + IK.
 
 Forward kinematics returns a :class:`~tsr.bimanual.BimanualPose` — the
 (absolute, relative) pose pair a :class:`~tsr.bimanual.BimanualTSR` speaks in.
@@ -11,13 +11,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
-from gafropy import DualArmTaskSpace, SystemSerialization
+from gafro import SystemSerialization
 from scipy.optimize import least_squares
-
 from tsr.bimanual import BimanualPose
 
+from pycbirrt.backends.gafro import _as_vector
+
 if TYPE_CHECKING:
-    from gafropy import System
+    from gafro import System
 
 
 class GafroBimanualModel:
@@ -30,15 +31,17 @@ class GafroBimanualModel:
         self._ctrl_idx = np.asarray(
             self.cooperative.get_controlled_joint_indices(), dtype=int)
 
-        self._lower = np.asarray(system.get_joint_limits_min(), dtype=float)
-        self._upper = np.asarray(system.get_joint_limits_max(), dtype=float)
+        # gafro returns joint limits as a JointPosition wrapper rather than an
+        # array; _as_vector reads its coefficients (gafropy returned an array).
+        self._lower = _as_vector(system.get_joint_limits_min())
+        self._upper = _as_vector(system.get_joint_limits_max())
 
         # The URDF/YAML-declared rest pose can sit fractions of a radian outside its
         # own declared limits (rounding in the robot description, e.g. gripper
         # joints on this rig) -- clamp so anything seeded from it (IK's default
         # init, a planner root) is actually valid, not silently poisoned from the start.
         self.default_system_configuration = np.clip(
-            np.asarray(system.get_default_configuration(), dtype=float),
+            _as_vector(system.get_default_configuration()),
             self._lower, self._upper,
         )
 
@@ -55,11 +58,11 @@ class GafroBimanualModel:
         return self._lower, self._upper
 
     def forward_kinematics(self, q: np.ndarray) -> BimanualPose:
-        [a, r] = self.cooperative.compute_task_space_motors(q)
-
+        # gafropy returned both task-space motors from one call; gafro exposes
+        # them as two accessors.
         return BimanualPose(
-            absolute=a,
-            relative=r,
+            absolute=self.cooperative.compute_absolute_motor(q),
+            relative=self.cooperative.compute_relative_motor(q),
         )
 
     def normalize_pose(self, x) -> BimanualPose:

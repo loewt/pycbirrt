@@ -21,9 +21,6 @@ import argparse
 
 import matplotlib.pyplot as plt
 import numpy as np
-from tsr import PlaneConstraint
-
-from pycbirrt import CBiRRT, CBiRRTConfig
 
 # Reuse the planar-arm helpers and the position-TSR factory from the sibling example.
 from planar_arm import (  # noqa: E402  (local example import)
@@ -33,6 +30,9 @@ from planar_arm import (  # noqa: E402  (local example import)
     make_position_tsr,
     visualize_result,
 )
+from tsr import PlaneConstraint
+
+from pycbirrt import CBiRRT, CBiRRTConfig
 
 
 def make_line_plane_constraint(theta: float, offset: float) -> PlaneConstraint:

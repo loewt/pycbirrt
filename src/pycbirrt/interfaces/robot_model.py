@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Protocol
 import numpy as np
 
 if TYPE_CHECKING:
-    from gafropy import Motor
+    from gafro import Motor
 
 
 class RobotModel(Protocol):
@@ -29,16 +29,16 @@ class RobotModel(Protocol):
             q: Joint configuration array of shape (dof,)
 
         Returns:
-            End-effector pose in the world frame as a ``gafropy.Motor``.
+            End-effector pose in the world frame as a ``gafro.Motor``.
             (The planner also tolerates a 4x4 homogeneous transform, which it
-            normalizes via the ``gafropy.Motor`` constructor, but Motor is the contract.)
+            normalizes via ``as_motor``, but Motor is the contract.)
         """
         ...
 
     def normalize_pose(self, x):
         """Coerce a pose (FK output or TSR pose) to this model's pose token.
 
-        Single-arm models return a ``gafropy.Motor``; a bimanual model returns
+        Single-arm models return a ``gafro.Motor``; a bimanual model returns
         a ``tsr.bimanual.BimanualPose``. The planner treats the result as opaque.
         """
         ...

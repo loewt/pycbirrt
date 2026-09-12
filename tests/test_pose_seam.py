@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
 import os
+
 import numpy as np
 import pytest
 
@@ -10,7 +11,8 @@ requires_robot = pytest.mark.skipif(not os.path.exists(ROBOT), reason=f"missing 
 
 @requires_robot
 def test_gafro_model_normalize_pose_returns_motor():
-    from gafropy import Motor
+    from gafro import Motor
+
     from pycbirrt.backends.gafro import GafroRobotModel
     # A real single-arm model; normalize_pose must coerce a 4x4 or a Motor to Motor.
     model = GafroRobotModel.from_file(ROBOT)

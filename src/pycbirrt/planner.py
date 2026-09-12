@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 
 import numpy as np
-from tsr import Constraint, TSR, choose_tsr_index
+from tsr import TSR, Constraint, choose_tsr_index
 from tsr.bimanual import BimanualPose
 from tsr.sampling import sample_from_tsrs
 

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
 import os
+
 import numpy as np
 import pytest
 
@@ -15,11 +16,12 @@ class _AllValid:
 
 @requires_robot
 def test_bimanual_plan_keeps_relative_grasp():
-    from pycbirrt.backends.gafro_bimanual import GafroBimanualModel, GafroBimanualIKSolver
-    from pycbirrt.planner import CBiRRT
-    from pycbirrt.config import CBiRRTConfig
     from tsr import TSR
     from tsr.bimanual import BimanualTSR
+
+    from pycbirrt.backends.gafro_bimanual import GafroBimanualIKSolver, GafroBimanualModel
+    from pycbirrt.config import CBiRRTConfig
+    from pycbirrt.planner import CBiRRT
 
     model = GafroBimanualModel.from_file(ROBOT)
     ik = GafroBimanualIKSolver(model, max_iterations=300, tolerance=1e-4)
@@ -34,7 +36,7 @@ def test_bimanual_plan_keeps_relative_grasp():
     relative_tsr = TSR(T0_w=start_pose.relative, Tw_e=np.eye(4), Bw=np.zeros((6, 2)))
     # Absolute goal region: allow the object to translate in a small box around
     # a shifted center; rotation pinned.
-    goal_center = start_pose.absolute.multiply(__import__("gafropy").Motor.exp(0, 0, 0, 0.1, 0.0, 0.0))
+    goal_center = start_pose.absolute.multiply(__import__("gafro").Motor.exp(0, 0, 0, 0.1, 0.0, 0.0))
     abs_Bw = np.array([[0.0, 0.0]] * 3 + [[-0.05, 0.05]] * 3)
     absolute_goal = TSR(T0_w=goal_center, Tw_e=np.eye(4), Bw=abs_Bw)
 

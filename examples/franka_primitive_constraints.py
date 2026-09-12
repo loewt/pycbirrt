@@ -19,14 +19,14 @@ that projection. Start and goal configurations are placed *exactly* on the
 manifold by snapping a seed pose onto it and solving IK, so the endpoints
 already satisfy the path constraint.
 
-Two views of the same robot (the ``gafropy.Visualizer`` idiom), both backed by
-one ``gafropy.System``:
+Two views of the same robot (the ``gafro.Visualizer`` idiom), both backed by
+one ``gafro.System``:
   * ``robot`` (a ``GafroRobotModel`` over the arm chain) does the math -- FK,
     geometric Jacobian, joint limits -- and feeds the gafro CBiRRT backend.
   * ``robot.system`` carries the visual meshes the ``Visualizer`` drives with
     FK. Their EE poses coincide.
 
-Install the viz extras first:  pip install gafropy[viz]
+Install the viz extras first:  pip install gafro[viz]
 
 Run with:
     python examples/franka_primitive_constraints.py                  # plane
@@ -39,12 +39,12 @@ from __future__ import annotations
 import argparse
 import time
 
+import gafro as ga
 import numpy as np
-import gafropy as ga
 from tsr import PlaneConstraint, SphereConstraint
 
 from pycbirrt import CBiRRT, CBiRRTConfig
-from pycbirrt.backends.gafro import GafroIKSolver, GafroRobotModel
+from pycbirrt.backends.gafro import GafroIKSolver, GafroRobotModel, as_motor
 
 # Any robot description with a 7-DOF arm chain works; the default ships a panda
 # whose "hand" chain is the arm (joints 1-7 ending at the hand frame).
@@ -60,7 +60,7 @@ class NoCollision:
 
 
 def _ee_xyz(robot: GafroRobotModel, q: np.ndarray) -> np.ndarray:
-    return ga.Motor(robot.forward_kinematics(q)).to_transformation_matrix()[:3, 3]
+    return as_motor(robot.forward_kinematics(q)).to_transformation_matrix()[:3, 3]
 
 
 def snap_config_to_constraint(robot, ik, q_seed, constraint) -> np.ndarray:
@@ -97,7 +97,8 @@ def make_sphere_constraint(robot, q_mid) -> SphereConstraint:
 def plan(constraint_kind: str, seed: int, robot_path: str = DEFAULT_ROBOT):
     """Build the robot, the constraint, and a CBiRRT path on the manifold."""
     robot = GafroRobotModel.from_file(robot_path, chain_name=DEFAULT_CHAIN)
-    ik = GafroIKSolver(robot.manipulator, robot.joint_limits, max_iterations=300, tolerance=1e-4)
+    ik = GafroIKSolver(robot.manipulator, robot.joint_limits, max_iterations=300, tolerance=1e-4,
+                       base_configuration=robot.base_configuration)
     print(f"  {robot.system.get_name()} ({robot.dof} DOF) via the gafro CGA backend")
 
     # Two seed configurations whose EE positions straddle the workspace; we snap

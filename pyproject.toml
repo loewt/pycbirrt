@@ -13,6 +13,7 @@ maintainers = [
 ]
 dependencies = [
     "numpy>=1.24",
+    "gafro>=0.1.9",
     "tsr @ git+https://github.com/loewt/tsr.git@gafro-integration",
 ]
 

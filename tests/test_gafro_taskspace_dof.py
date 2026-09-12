@@ -20,34 +20,73 @@ CHAIN = "left_ur5e/endeffector_link"
 requires_robot = pytest.mark.skipif(not os.path.exists(ROBOT), reason=f"missing {ROBOT}")
 
 
+ARM_GROUP = "left_arm"
+
+
+def _add_arm_control_group(system, name=ARM_GROUP):
+    """Group the chain's *arm* actuators, leaving the torso rail uncontrolled.
+
+    MJCF/URDF carry no control-group concept, so a freshly loaded System has
+    none and gafro then treats every joint in the chain as controlled -- the
+    torso rail included. The planner wants the 6 UR5e joints, so build the group
+    explicitly from the rotary actuators on this arm.
+    """
+    group = system.add_control_group(name)
+    for actuator in system.get_actuators():
+        joint_name = getattr(actuator, "joint_name", None)
+        if joint_name and joint_name.startswith("left_ur5e/"):
+            group.add_actuator(actuator)
+    return group
+
+
 @pytest.fixture
-def manipulator():
-    from gafropy import SingleArmTaskSpace, SystemSerialization
+def system():
+    from gafro import SystemSerialization
 
     system = SystemSerialization.load(ROBOT)
-    return SingleArmTaskSpace(system, CHAIN, CHAIN)
+    _add_arm_control_group(system)
+    return system
+
+
+@pytest.fixture
+def manipulator(system):
+    from gafro import SingleArmTaskSpace
+
+    return SingleArmTaskSpace(system, CHAIN, CHAIN, {ARM_GROUP})
+
+
+@pytest.fixture
+def model(system):
+    """GafroRobotModel over the same System, restricted to the arm group."""
+    from pycbirrt.backends.gafro import GafroRobotModel
+
+    return GafroRobotModel(system, chain_name=CHAIN, control_groups={ARM_GROUP})
 
 
 @requires_robot
-def test_solver_dof_matches_control_jacobian(manipulator):
+def test_solver_dof_matches_control_jacobian(manipulator, system):
     from pycbirrt.backends.gafro import GafroIKSolver
 
-    solver = GafroIKSolver(manipulator)
+    solver = GafroIKSolver(manipulator, system=system)
+    # gafro's geometric Jacobian spans the full chain width; the solver searches
+    # in the controlled width, so it slices the controlled columns out.
     jac = np.asarray(
-        manipulator.compute_ee_geometric_jacobian(np.zeros(manipulator.get_dof())))
-    assert solver._dof == jac.shape[1] == manipulator.get_controlled_dof()
+        manipulator.compute_geometric_jacobian(np.zeros(manipulator.get_dof())))
+    assert jac.shape[1] == manipulator.get_dof()
+    assert solver._dof == manipulator.get_controlled_dof()
+    assert jac[:, solver._ctrl_idx].shape[1] == solver._dof
     lower, upper = solver.joint_limits
     assert len(lower) == solver._dof and len(upper) == solver._dof
 
 
 @requires_robot
-def test_solve_reaches_a_reachable_pose_without_broadcast_error(manipulator):
+def test_solve_reaches_a_reachable_pose_without_broadcast_error(manipulator, system):
     from pycbirrt.backends.gafro import GafroIKSolver
 
-    solver = GafroIKSolver(manipulator, max_iterations=300, tolerance=1e-5)
+    solver = GafroIKSolver(manipulator, max_iterations=300, tolerance=1e-5, system=system)
     # A pose known reachable: FK of a controlled-width config.
     q_seed = np.full(solver._dof, 0.2)
-    target = solver.manipulator.compute_ee_motor(_to_full(manipulator, q_seed))
+    target = solver.manipulator.compute_ee_motor(_to_full(manipulator, system, q_seed))
 
     sols = solver.solve(target, q_init=q_seed)
     assert sols, "solver returned no solution"
@@ -55,11 +94,11 @@ def test_solve_reaches_a_reachable_pose_without_broadcast_error(manipulator):
 
 
 @requires_robot
-def test_solve_holds_noncontrolled_joint_fixed(manipulator):
+def test_solve_holds_noncontrolled_joint_fixed(manipulator, system):
     from pycbirrt.backends.gafro import GafroIKSolver
 
-    solver = GafroIKSolver(manipulator, max_iterations=300, tolerance=1e-5)
-    ctrl_idx = np.asarray(manipulator.get_controlled_joints(), dtype=int)
+    solver = GafroIKSolver(manipulator, max_iterations=300, tolerance=1e-5, system=system)
+    ctrl_idx = np.asarray(manipulator.get_task_space_joint_indices(), dtype=int)
 
     q_seed = np.full(solver._dof, 0.15)
     base = solver._mid_full.copy()
@@ -78,31 +117,26 @@ def test_solve_holds_noncontrolled_joint_fixed(manipulator):
 
 
 @requires_robot
-def test_robot_model_reports_controlled_dof(manipulator):
-    from pycbirrt.backends.gafro import GafroRobotModel
-
-    model = GafroRobotModel.from_file(ROBOT, chain_name=CHAIN)
+def test_robot_model_reports_controlled_dof(model, manipulator):
     assert model.dof == manipulator.get_controlled_dof()
     lower, upper = model.joint_limits
     assert len(lower) == model.dof and len(upper) == model.dof
 
 
 @requires_robot
-def test_robot_model_fk_accepts_controlled_width(manipulator):
-    from gafropy import Motor
-    from pycbirrt.backends.gafro import GafroRobotModel
+def test_robot_model_fk_accepts_controlled_width(model, manipulator):
+    from gafro import Motor  # noqa: F401
 
-    model = GafroRobotModel.from_file(ROBOT, chain_name=CHAIN)
+    from pycbirrt.backends.gafro import as_motor
+
     q = np.full(model.dof, 0.1)
     pose = model.forward_kinematics(q)
-    assert Motor(pose) is not None
+    assert as_motor(pose) is not None
+
 
 
 @requires_robot
-def test_to_system_configuration_places_joints_at_correct_indices(manipulator):
-    from pycbirrt.backends.gafro import GafroRobotModel
-
-    model = GafroRobotModel.from_file(ROBOT, chain_name=CHAIN)
+def test_to_system_configuration_places_joints_at_correct_indices(model, manipulator):
     q = np.arange(1, model.dof + 1, dtype=float)  # distinctive controlled values
     sys_q = model.to_system_configuration(q)
 
@@ -116,10 +150,8 @@ def test_to_system_configuration_places_joints_at_correct_indices(manipulator):
 
 
 @requires_robot
-def test_system_to_controlled_round_trips_default_config(manipulator):
-    from pycbirrt.backends.gafro import GafroRobotModel
+def test_system_to_controlled_round_trips_default_config(model, manipulator):
 
-    model = GafroRobotModel.from_file(ROBOT, chain_name=CHAIN)
     dc = model.default_system_configuration
     start = model.system_to_controlled(dc)
     assert start.shape == (model.dof,)
@@ -136,6 +168,7 @@ def test_system_to_controlled_round_trips_default_config(manipulator):
 def test_plan_to_tsr_end_to_end():
     """Regression for the (7,)+(6,) crash: a full plan to a TSR must succeed."""
     from tsr import TSR
+
     from pycbirrt import CBiRRT, CBiRRTConfig
     from pycbirrt.backends.gafro import GafroIKSolver, GafroRobotModel
 
@@ -143,11 +176,19 @@ def test_plan_to_tsr_end_to_end():
         def is_valid(self, q):
             return True
 
-    from gafropy import Motor
+    from gafro import (
+        Motor,  # noqa: F401
+        SystemSerialization,
+    )
 
-    robot = GafroRobotModel.from_file(ROBOT, chain_name=CHAIN)
+    from pycbirrt.backends.gafro import as_motor
+
+    system = SystemSerialization.load(ROBOT)
+    _add_arm_control_group(system)
+    robot = GafroRobotModel(system, chain_name=CHAIN, control_groups={ARM_GROUP})
     ik = GafroIKSolver(robot.manipulator, robot.joint_limits,
-                       max_iterations=300, tolerance=1e-6)
+                       max_iterations=300, tolerance=1e-6,
+                       base_configuration=robot.base_configuration)
     config = CBiRRTConfig(max_iterations=5000, step_size=0.15, goal_bias=0.2,
                           tsr_samples=50, angular_joints=(True,) * robot.dof)
     planner = CBiRRT(robot, ik, NoCollision(), config)
@@ -157,10 +198,12 @@ def test_plan_to_tsr_end_to_end():
     # origin, so an absolute hand-picked pose would be out of reach).
     start = np.full(robot.dof, 0.1)
     goal_q = np.full(robot.dof, -0.3)
-    T0_w = Motor(robot.forward_kinematics(goal_q)).to_transformation_matrix()
+    T0_w = as_motor(robot.forward_kinematics(goal_q)).to_transformation_matrix()
+    # Bw rows are the CGA split [tx, ty, tz, b12, b13, b23]: translation first,
+    # then the rotor bivector log -- not rotation-first.
     Bw = np.array([
-        [-np.pi, np.pi], [0.0, 0.0], [0.0, 0.0],   # free yaw about EE z
         [-0.05, 0.05], [-0.05, 0.05], [-0.05, 0.05],  # small translation box
+        [-np.pi, np.pi], [0.0, 0.0], [0.0, 0.0],   # free rotation about one axis
     ])
     tsr = TSR(T0_w=T0_w, Tw_e=np.eye(4), Bw=Bw)
 
@@ -169,14 +212,16 @@ def test_plan_to_tsr_end_to_end():
     assert all(wp.shape == (robot.dof,) for wp in result.path)
 
 
-def _to_full(manipulator, q_ctrl):
-    ctrl_idx = np.asarray(manipulator.get_controlled_joints(), dtype=int)
-    # Joint limits are System-level now; map them to task (full chain) width.
-    system = manipulator.get_system()
+def _to_full(manipulator, system, q_ctrl):
+    from pycbirrt.backends.gafro import _extract_configuration
+
+    ctrl_idx = np.asarray(manipulator.get_task_space_joint_indices(), dtype=int)
+    # Joint limits are System-level; map them to task (full chain) width. gafro
+    # task spaces carry no back-reference to their System, so it is passed in.
     lower = np.asarray(
-        manipulator.extract_configuration(system.get_joint_limits_min()), dtype=float)
+        _extract_configuration(manipulator, system.get_joint_limits_min()), dtype=float)
     upper = np.asarray(
-        manipulator.extract_configuration(system.get_joint_limits_max()), dtype=float)
+        _extract_configuration(manipulator, system.get_joint_limits_max()), dtype=float)
     full = 0.5 * (lower + upper)
     full[ctrl_idx] = q_ctrl
     return full

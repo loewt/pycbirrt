@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
 import os
+
 import numpy as np
 import pytest
 
@@ -16,8 +17,8 @@ def model():
 
 @requires_robot
 def test_fk_returns_pose_pair(model):
+    from gafro import Motor
     from tsr.bimanual import BimanualPose
-    from gafropy import Motor
     q = np.zeros(model.dof)
     pose = model.forward_kinematics(q)
     assert isinstance(pose, BimanualPose)
@@ -35,7 +36,7 @@ def test_dof_is_two_arms_controlled(model):
 
 @requires_robot
 def test_normalize_pose_passthrough(model):
+    from gafro import Motor
     from tsr.bimanual import BimanualPose
-    from gafropy import Motor
     p = BimanualPose(absolute=Motor(), relative=Motor())
     assert model.normalize_pose(p) is p

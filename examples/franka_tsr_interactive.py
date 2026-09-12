@@ -14,11 +14,11 @@ exposes the region's ``Bw`` extents as viser sliders. Whenever you change a
 slider the TSR is rebuilt and the planner **replans** to the new region (the
 serve loop debounces the slider stream so it only replans once the drag settles).
 
-Everything is gafro-CGA-native: a ``gafropy.System`` does FK/Jacobians via its
+Everything is gafro-CGA-native: a ``gafro.System`` does FK/Jacobians via its
 arm task space, the same ``System`` carries the meshes the ``Visualizer`` drives
-with FK, and the TSR geometry is gafropy Motors throughout -- no MuJoCo / EAIK.
+with FK, and the TSR geometry is gafro Motors throughout -- no MuJoCo / EAIK.
 
-Install the viz extras first:  pip install gafropy[viz]
+Install the viz extras first:  pip install gafro[viz]
 
 Run with:
     python examples/franka_tsr_interactive.py
@@ -30,12 +30,12 @@ from __future__ import annotations
 import argparse
 import time
 
+import gafro as ga
 import numpy as np
-import gafropy as ga
 from tsr import TSR
 
 from pycbirrt import CBiRRT, CBiRRTConfig
-from pycbirrt.backends.gafro import GafroIKSolver, GafroRobotModel
+from pycbirrt.backends.gafro import GafroIKSolver, GafroRobotModel, as_motor
 
 # Any robot description with a 7-DOF arm chain works; the default ships a panda
 # whose "hand" chain is the arm (joints 1-7 ending at the hand frame).
@@ -63,6 +63,7 @@ class TSRPlanner:
         self.seed = seed
         self.robot = GafroRobotModel.from_file(robot_path, chain_name=DEFAULT_CHAIN)
         self.ik = GafroIKSolver(self.robot.manipulator, self.robot.joint_limits,
+                                base_configuration=self.robot.base_configuration,
                                 max_iterations=300, tolerance=1e-6)
         self.config = CBiRRTConfig(
             max_iterations=5000, step_size=0.15, goal_bias=0.2, tsr_samples=50,
@@ -78,12 +79,12 @@ class TSRPlanner:
         # Reference goal pose derived from FK at a reachable config, so the TSR
         # region is reachable for whatever arm is loaded (see TSR_REF_FRACTION).
         ref_q = np.full(self.robot.dof, TSR_REF_FRACTION)
-        T_ref = ga.Motor(self.robot.forward_kinematics(ref_q)).to_transformation_matrix()
+        T_ref = as_motor(self.robot.forward_kinematics(ref_q)).to_transformation_matrix()
         self.tsr_center = T_ref[:3, 3]
         self.tsr_rot = T_ref[:3, :3]
 
     def ee_xyz(self, q) -> np.ndarray:
-        return ga.Motor(self.robot.forward_kinematics(q)).to_transformation_matrix()[:3, 3]
+        return as_motor(self.robot.forward_kinematics(q)).to_transformation_matrix()[:3, 3]
 
     def plan(self, tsr: TSR):
         """Plan from the fixed start into ``tsr``. Returns ``(path, info)``."""
@@ -201,7 +202,7 @@ def visualize(planner: TSRPlanner, port: int):
 
 
 def _quat(rot3):
-    from gafropy.viz import quaternion_from_matrix
+    from gafro.visualization import quaternion_from_matrix
 
     m = np.eye(4)
     m[:3, :3] = rot3

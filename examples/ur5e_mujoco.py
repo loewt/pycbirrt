@@ -34,10 +34,10 @@ from pathlib import Path
 import mujoco
 import mujoco.viewer
 import numpy as np
-from gafropy import Motor
 from tsr import TSR
 
 from pycbirrt import CBiRRT, CBiRRTConfig
+from pycbirrt.backends.gafro import as_motor
 from pycbirrt.backends.mujoco import (
     MuJoCoCollisionChecker,
     MuJoCoIKSolver,
@@ -383,7 +383,7 @@ def main():
     # Verify goal reached
     final_pose = robot.forward_kinematics(path[-1])
     dist, _ = grasp_tsr.distance(final_pose)
-    print(f"Final EE position: {Motor(final_pose).to_transformation_matrix()[:3, 3]}")
+    print(f"Final EE position: {as_motor(final_pose).to_transformation_matrix()[:3, 3]}")
     print(f"Distance to TSR: {dist:.4f}")
 
     # Visualization

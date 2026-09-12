@@ -12,9 +12,7 @@ end-effector to a horizontal line — the geometric-primitive analogue of the
 import sys
 from pathlib import Path
 
-import numpy as np
 import pytest
-
 from tsr import PlaneConstraint
 
 from pycbirrt import CBiRRT, CBiRRTConfig

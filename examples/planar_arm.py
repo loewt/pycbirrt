@@ -18,11 +18,12 @@ import argparse
 
 import matplotlib.pyplot as plt
 import numpy as np
+from gafro import Motor
 from matplotlib.patches import Circle, Rectangle
-from gafropy import Motor
 from tsr import TSR
 
 from pycbirrt import CBiRRT, CBiRRTConfig
+from pycbirrt.backends.gafro import as_motor
 
 
 class PlanarArmRobot:
@@ -51,7 +52,7 @@ class PlanarArmRobot:
         return T
 
     def normalize_pose(self, x) -> Motor:
-        return Motor(x)
+        return as_motor(x)
 
     def get_joint_positions(self, q: np.ndarray) -> list[np.ndarray]:
         """Get positions of base, elbow, and end-effector for visualization."""
@@ -87,7 +88,7 @@ class PlanarArmIK:
 
         Note: q_init is ignored for analytical solver.
         """
-        pose = Motor(pose).to_transformation_matrix()  # accept a gafropy.Motor or a 4x4 matrix
+        pose = as_motor(pose).to_transformation_matrix()  # accept a gafro.Motor or a 4x4 matrix
         x, y = pose[0, 3], pose[1, 3]
         d = np.sqrt(x**2 + y**2)
 
