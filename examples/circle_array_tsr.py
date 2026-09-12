@@ -190,8 +190,15 @@ class NoCollision:
         return True
 
 
-def plan_bigger_shape(model, arm_count: int, q_seed: np.ndarray, growth: float = 0.25):
+def plan_bigger_shape(model, arm_count: int, q_seed: np.ndarray, growth: float = 0.25,
+                      metric=None, metric_sampling: bool = False,
+                      geodesic_extension: bool = False):
     """Plan a path that grows the held circle / sphere by ``growth`` in log scale.
+
+    ``metric`` is the configuration-space metric the planner measures with; None
+    means the Euclidean default. A kinetic-energy metric matters more here than
+    for one arm: the array has several arms' worth of inertia, and swinging a
+    whole arm inward costs far more than flicking one wrist.
 
     Returns ``(path, region)``, or ``(None, region)`` if no path was found.
     """
@@ -210,7 +217,9 @@ def plan_bigger_shape(model, arm_count: int, q_seed: np.ndarray, growth: float =
     solver = GafroMultiArmIKSolver(model, max_iterations=150, tolerance=1e-4,
                                    collision_checker=NoCollision())
     config = CBiRRTConfig(max_iterations=800, step_size=0.25, goal_bias=0.3,
-                          tsr_samples=15, angular_joints=(True,) * model.dof)
+                          tsr_samples=15, angular_joints=(True,) * model.dof,
+                          metric=metric, metric_sampling=metric_sampling,
+                          geodesic_extension=geodesic_extension)
     planner = CBiRRT(model, solver, NoCollision(), config)
     result = planner.plan(start=q_seed, goal_tsrs=[region], seed=1, return_details=True)
     return (result.path if result.success else None), region
@@ -306,6 +315,12 @@ def main() -> int:
                         help="where to write the composed array (default: a temp dir)")
     parser.add_argument("--plan", action="store_true",
                         help="plan a path that grows the held shape (3 and 4 arms)")
+    parser.add_argument("--metric", default="euclidean", choices=("euclidean", "kinetic"),
+                        help="configuration-space metric the planner measures with")
+    parser.add_argument("--metric-sampling", action="store_true",
+                        help="weight random samples by sqrt(det M) (needs --metric kinetic)")
+    parser.add_argument("--geodesic-extension", action="store_true",
+                        help="extend along the natural gradient (needs --metric kinetic)")
     args = parser.parse_args()
 
     system, path = build_system(args.arms, args.radius, args.out_dir)
@@ -329,14 +344,22 @@ def main() -> int:
         if args.arms < 3:
             print("plan:       --plan covers the cooperative (3/4 arm) cases")
         else:
-            path, _region = plan_bigger_shape(model, args.arms, q_seed)
+            metric = None
+            if args.metric == "kinetic":
+                from pycbirrt.metrics import metric_for_model
+
+                metric = metric_for_model(model)
+            path, _region = plan_bigger_shape(
+                model, args.arms, q_seed, metric=metric,
+                metric_sampling=args.metric_sampling,
+                geodesic_extension=args.geodesic_extension)
             if path is None:
                 print("plan:       no path found")
             else:
                 zero = model.tsr_class(Bw=np.zeros((model.tsr_class._DOF, 2)))
                 start_dilation = zero.to_bw(model.forward_kinematics(q_seed))[3]
                 end_dilation = zero.to_bw(model.forward_kinematics(path[-1]))[3]
-                print(f"plan:       {len(path)} waypoints, "
+                print(f"plan:       [{args.metric}] {len(path)} waypoints, "
                       f"dilation {start_dilation:+.3f} -> {end_dilation:+.3f} "
                       f"(x{np.exp(end_dilation - start_dilation):.2f} bigger)")
 

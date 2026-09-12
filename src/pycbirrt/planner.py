@@ -106,6 +106,9 @@ class CBiRRT:
                 )
 
         self._rng = np.random.default_rng()
+        # Running upper bound on the metric volume element, for rejection
+        # sampling; it only ever grows, so it self-corrects from below.
+        self._sample_density_bound = 0.0
         # Path constraints are queried only through the Constraint seam
         # (distance / to_transform), so any Constraint works — TSR or a geometric
         # primitive such as PlaneConstraint. Start/goal regions additionally need
@@ -620,9 +623,36 @@ class CBiRRT:
         Uses robot.joint_limits for all joints. For angular joints,
         the limits should cover the working range (e.g., ±2π). The
         angular distance metric handles wrapping.
+
+        With ``metric_sampling`` enabled and a metric that exposes a volume
+        element, samples are drawn proportional to ``sqrt(det M(q))`` by
+        rejection rather than uniformly in joint coordinates. A uniform sample
+        spreads an RRT's Voronoi bias by *Euclidean* volume, which pulls tree
+        growth back toward the coordinate geometry however the nearest-neighbour
+        metric is defined; weighting by the volume element makes the bias follow
+        the metric instead.
         """
         lower, upper = self.robot.joint_limits
-        return self._rng.uniform(lower, upper)
+        volume_element = getattr(self.config.metric, "volume_element", None)
+        if not self.config.metric_sampling or volume_element is None:
+            return self._rng.uniform(lower, upper)
+
+        # Rejection sampling against a running estimate of the peak density.
+        # The bound self-corrects upward whenever a larger value appears, so a
+        # loose initial estimate costs a few extra draws, not correctness.
+        best = self._sample_density_bound
+        candidate = None
+        for _ in range(self.config.metric_sampling_tries):
+            candidate = self._rng.uniform(lower, upper)
+            density = volume_element(candidate)
+            if density > best:
+                best = density
+                self._sample_density_bound = best
+            if best <= 0.0 or self._rng.random() < density / best:
+                return candidate
+        # Budget exhausted: fall back to the last uniform draw, which keeps the
+        # sampler total rather than looping forever in a flat region.
+        return candidate
 
     def _is_within_limits(self, q: np.ndarray) -> bool:
         """Check if configuration is within joint limits.
@@ -642,19 +672,56 @@ class CBiRRT:
         return bool(np.all(q >= lower) and np.all(q <= upper))
 
     def _angular_distance(self, q1: np.ndarray, q2: np.ndarray) -> float:
-        """Compute distance between configurations, handling angular wraparound.
+        """Distance between configurations, handling angular wraparound.
 
-        For angular joints, the distance accounts for the 2*pi wraparound.
+        Wraparound is resolved here so the metric only ever sees a genuine
+        displacement; the metric then decides how to measure it (Euclidean by
+        default, or by kinetic energy when one is configured).
         """
-        diff = q2 - q1
+        diff = self._angular_direction(q1, q2)
+        return self._metric_norm(q1, diff)
 
-        if self.config.angular_joints is not None:
-            # Wrap angular differences to [-pi, pi]
-            for i, is_angular in enumerate(self.config.angular_joints):
-                if is_angular:
-                    diff[i] = np.arctan2(np.sin(diff[i]), np.cos(diff[i]))
+    def _metric_norm(self, q: np.ndarray, dq: np.ndarray) -> float:
+        """Length of displacement ``dq`` at ``q`` under the configured metric."""
+        if self.config.metric is None:
+            return float(np.linalg.norm(dq))
+        return float(self.config.metric.norm(q, dq))
 
-        return float(np.linalg.norm(diff))
+    def _metric_scale(self, q: np.ndarray, dq: np.ndarray, target: float,
+                      length: float) -> np.ndarray:
+        """Shorten ``dq`` to metric length ``target`` (``length`` is its current one)."""
+        scale_to_length = getattr(self.config.metric, "scale_to_length", None)
+        if scale_to_length is None:
+            return dq / length * target
+        return np.asarray(scale_to_length(q, dq, target), dtype=float)
+
+    def _extension_step(self, q_current: np.ndarray, q_target: np.ndarray,
+                        direction: np.ndarray, distance: float) -> np.ndarray | None:
+        """One extension step from ``q_current`` toward ``q_target``.
+
+        Straight-line by default. With ``geodesic_extension`` the direction is
+        the metric's Riemannian natural gradient of the squared-distance
+        potential -- a discrete geodesic step in the sense of Kyaw & Kelly,
+        "Geometry-Aware Sampling-Based Motion Planning on Riemannian Manifolds"
+        (Algorithm 1). Under an anisotropic metric that direction is *not* the
+        straight line: steepest descent turns away from the heavy directions.
+
+        Returns None when no usable step exists (a degenerate gradient).
+        """
+        target_length = min(distance, self.config.step_size)
+        if self.config.geodesic_extension and self.config.metric is not None:
+            natural_gradient = getattr(self.config.metric, "natural_gradient", None)
+            if natural_gradient is not None:
+                descent = np.asarray(natural_gradient(q_current, q_target), dtype=float)
+                # Keep the angular convention of the straight-line direction:
+                # wraparound was already resolved there.
+                if self.config.angular_joints is not None:
+                    descent = self._angular_direction(q_current, q_current + descent)
+                length = self._metric_norm(q_current, descent)
+                if length <= 1e-12:
+                    return None
+                return self._metric_scale(q_current, descent, target_length, length)
+        return self._metric_scale(q_current, direction, target_length, distance)
 
     def _nearest_node(self, tree: RRTree, q_target: np.ndarray) -> int:
         """Find nearest node in tree using angular-aware distance.
@@ -666,8 +733,9 @@ class CBiRRT:
         Returns:
             Index of nearest node
         """
-        if self.config.angular_joints is None:
-            # Use tree's built-in nearest (faster)
+        if self.config.angular_joints is None and self.config.metric is None:
+            # Use tree's built-in nearest (faster); it hardcodes the Euclidean
+            # norm, so it is only valid when no metric is configured.
             return tree.nearest(q_target)
 
         # Compute angular-aware distances
@@ -719,9 +787,11 @@ class CBiRRT:
         while True:
             q_current = tree.nodes[current_idx].config
 
-            # Compute direction and remaining distance (angular-aware)
+            # Compute direction and remaining distance (angular-aware, and in
+            # the configured metric so step_size means the same thing here as
+            # it does to the nearest-neighbour query).
             direction = self._angular_direction(q_current, q_target)
-            distance = np.linalg.norm(direction)
+            distance = self._metric_norm(q_current, direction)
 
             # Check if we've reached the target
             if distance < self.config.tsr_tolerance:
@@ -736,8 +806,16 @@ class CBiRRT:
             if max_steps is not None and steps_taken >= max_steps:
                 break
 
-            # Normalize and limit step size
-            step = direction / distance * min(distance, self.config.step_size)
+            # Choose the step. With geodesic_extension the direction comes from
+            # the metric's natural gradient (a discrete geodesic step) rather
+            # than the straight line; otherwise it is the straight line toward
+            # the target. Either way it is then scaled to metric length
+            # step_size -- the midpoint rule is not absolutely homogeneous
+            # (scaling dq moves the point where M is sampled), so a plain
+            # division can miss the requested length badly.
+            step = self._extension_step(q_current, q_target, direction, distance)
+            if step is None:
+                break
             q_new = q_current + step
 
             # Check joint limits
@@ -877,25 +955,31 @@ class CBiRRT:
             if attempts_without_improvement >= self.config.smoothing_patience:
                 break
 
-            prev_len = len(smoothed)
-
             # Pick two random points (need at least one point between them)
             i = self._rng.integers(0, len(smoothed) - 2)
             j = self._rng.integers(i + 2, len(smoothed))
 
             # Try to grow from i to j
             shortcut = self._try_shortcut(smoothed[i], smoothed[j])
+            improved = False
             if shortcut is not None:
-                # Replace path[i:j+1] with the shortcut
-                smoothed = smoothed[:i] + shortcut + smoothed[j + 1 :]
+                candidate = smoothed[:i] + shortcut + smoothed[j + 1 :]
+                # Accept on *path cost* in the configured metric, not on
+                # waypoint count: under a kinetic-energy metric a shortcut with
+                # fewer waypoints can still cost more work, and keeping it would
+                # undo exactly what the metric was chosen to optimise.
+                if self._path_cost(candidate) < self._path_cost(smoothed):
+                    smoothed = candidate
+                    improved = True
 
-            # Track improvement
-            if len(smoothed) < prev_len:
-                attempts_without_improvement = 0
-            else:
-                attempts_without_improvement += 1
+            attempts_without_improvement = 0 if improved else attempts_without_improvement + 1
 
         return smoothed
+
+    def _path_cost(self, path) -> float:
+        """Total length of a path under the configured metric."""
+        return float(sum(self._angular_distance(path[k], path[k + 1])
+                         for k in range(len(path) - 1)))
 
     def _try_shortcut(self, q_from: np.ndarray, q_to: np.ndarray) -> list[np.ndarray] | None:
         """Try to find a shorter path between two configurations using grow.
