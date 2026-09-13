@@ -76,6 +76,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -117,7 +118,9 @@ def build_arm(out_dir: Path | None = None):
 
     from pycbirrt.backends.gafro import GafroRobotModel
 
-    directory = Path(out_dir) if out_dir else Path(__file__).resolve().parent
+    # Default to a temp directory: writing the composed arm next to the source
+    # leaves a generated file in the repo.
+    directory = Path(out_dir) if out_dir else Path(tempfile.mkdtemp(prefix="metric_arm_"))
     path = write_circle_array(1, directory / "metric_comparison_arm.yaml")
     system = ga.SystemSerialization.load(str(path))
     return GafroRobotModel(system, chain_name="arm0/ur5e_ee"), system
