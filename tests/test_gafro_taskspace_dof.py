@@ -15,7 +15,9 @@ import os
 import numpy as np
 import pytest
 
-ROBOT = "/home/tobi/coding/src/rss/geodude.xml"
+ROBOT = os.environ.get("GEODUDE_TEST_ROBOT", os.path.abspath(os.path.join(
+    os.path.dirname(__file__), "..", "..", "gafro-examples", "assets", "robots",
+    "geodude", "geodude.xml")))
 CHAIN = "left_ur5e/endeffector_link"
 requires_robot = pytest.mark.skipif(not os.path.exists(ROBOT), reason=f"missing {ROBOT}")
 

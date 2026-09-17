@@ -283,7 +283,10 @@ def metric_for_model(model, evaluate_at: str = "midpoint", **kwargs) -> KineticE
         ctrl_idx = np.asarray(ctrl_idx, dtype=int)
         task_to_system = getattr(model, "_task_to_system", None)
         if task_to_system is not None:
-            # Single-arm model: it maps its own chain into the System itself.
+            # A model that maps its own joints into the System itself: the
+            # single-arm and bimanual ones both do. Its widening also holds the
+            # joints it does not plan at the System's default pose, rather than
+            # at the zero the cooperative branch below has to assume.
             widen = getattr(model, "to_system_configuration", None)
             indices = np.asarray(task_to_system, dtype=int)[ctrl_idx]
         else:
