@@ -8,8 +8,24 @@ from pycbirrt.exceptions import (
     AllStartConfigurationsInCollision,
     AllStartConfigurationsInvalid,
     PlanningError,
+    UnsupportedCapability,
 )
 from pycbirrt.planner import CBiRRT, PlanResult
+from pycbirrt.sets import (
+    AllOf,
+    AnyOf,
+    FiniteSet,
+    MostViolatedProjection,
+    PredicateSet,
+    Sample,
+    SetDistance,
+    SetProjector,
+    SetSampler,
+    StateSet,
+    supports,
+)
+from pycbirrt.space import JointSpace
+from pycbirrt.tsr_set import TSRConfigurationSet, tsr_weights
 
 __all__ = [
     "CBiRRT",
@@ -20,4 +36,19 @@ __all__ = [
     "AllGoalConfigurationsInCollision",
     "AllStartConfigurationsInvalid",
     "AllGoalConfigurationsInvalid",
+    "UnsupportedCapability",
+    "StateSet",
+    "SetSampler",
+    "SetDistance",
+    "SetProjector",
+    "Sample",
+    "FiniteSet",
+    "PredicateSet",
+    "AnyOf",
+    "AllOf",
+    "MostViolatedProjection",
+    "supports",
+    "JointSpace",
+    "TSRConfigurationSet",
+    "tsr_weights",
 ]

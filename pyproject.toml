@@ -30,7 +30,8 @@ examples = [
 dev = [
     "pytest>=7.0",
     "pytest-cov",
-    "ruff",
+    "ruff>=0.15,<0.16",  # formatter style only changes in minor releases; bump deliberately
+    "hypothesis>=6.100",
 ]
 all = ["pycbirrt[mujoco,eaik,examples,dev]"]
 
@@ -48,6 +49,8 @@ where = ["src"]
 
 [tool.ruff]
 line-length = 120
+# Newer ruff formats code blocks in Markdown; keep prose examples as written.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["F", "E", "W", "I"]

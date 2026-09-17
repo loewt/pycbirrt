@@ -18,6 +18,7 @@ from pycbirrt.exceptions import (
     AllStartConfigurationsInvalid,
 )
 from pycbirrt.interfaces import CollisionChecker, IKSolver, RobotModel
+from pycbirrt.space import JointSpace
 from pycbirrt.tree import RRTree
 
 logger = logging.getLogger(__name__)
@@ -98,12 +99,10 @@ class CBiRRT:
         self.collision = collision_checker
         self.config = config or CBiRRTConfig()
 
-        # Validate angular_joints length matches robot DOF
-        if self.config.angular_joints is not None:
-            if len(self.config.angular_joints) != robot.dof:
-                raise ValueError(
-                    f"angular_joints length ({len(self.config.angular_joints)}) must match robot DOF ({robot.dof})"
-                )
+        # Joint-space geometry: limits, metric, interpolation, sampling.
+        # Raises ValueError if angular_joints length does not match robot DOF.
+        lower, upper = robot.joint_limits
+        self.space = JointSpace(lower, upper, angular_joints=self.config.angular_joints)
 
         self._rng = np.random.default_rng()
         # Running upper bound on the metric volume element, for rejection
@@ -602,7 +601,7 @@ class CBiRRT:
             best_q = None
             best_dist = float("inf")
             for sol in solutions:
-                if not self._is_within_limits(sol):
+                if not self.space.within_limits(sol):
                     continue
                 d = self._angular_distance(q_current, sol)
                 if d < best_dist:
@@ -620,9 +619,9 @@ class CBiRRT:
     def _sample_random_config(self) -> np.ndarray:
         """Sample a random configuration within joint limits.
 
-        Uses robot.joint_limits for all joints. For angular joints,
-        the limits should cover the working range (e.g., ±2π). The
-        angular distance metric handles wrapping.
+        Draws from the joint-space box (``self.space``). For angular joints the
+        limits should cover the working range (e.g. ±2π); the angular distance
+        metric handles wrapping.
 
         With ``metric_sampling`` enabled and a metric that exposes a volume
         element, samples are drawn proportional to ``sqrt(det M(q))`` by
@@ -632,10 +631,9 @@ class CBiRRT:
         metric is defined; weighting by the volume element makes the bias follow
         the metric instead.
         """
-        lower, upper = self.robot.joint_limits
         volume_element = getattr(self.config.metric, "volume_element", None)
         if not self.config.metric_sampling or volume_element is None:
-            return self._rng.uniform(lower, upper)
+            return self.space.sample(self._rng)
 
         # Rejection sampling against a running estimate of the peak density.
         # The bound self-corrects upward whenever a larger value appears, so a
@@ -643,7 +641,7 @@ class CBiRRT:
         best = self._sample_density_bound
         candidate = None
         for _ in range(self.config.metric_sampling_tries):
-            candidate = self._rng.uniform(lower, upper)
+            candidate = self.space.sample(self._rng)
             density = volume_element(candidate)
             if density > best:
                 best = density
@@ -654,32 +652,19 @@ class CBiRRT:
         # sampler total rather than looping forever in a flat region.
         return candidate
 
-    def _is_within_limits(self, q: np.ndarray) -> bool:
-        """Check if configuration is within joint limits.
-
-        Angular (continuous) joints always pass — any angle is valid.
-        """
-        lower, upper = self.robot.joint_limits
-
-        if self.config.angular_joints is not None:
-            for i in range(len(q)):
-                if self.config.angular_joints[i]:
-                    continue  # angular joint, any value is valid
-                if q[i] < lower[i] or q[i] > upper[i]:
-                    return False
-            return True
-
-        return bool(np.all(q >= lower) and np.all(q <= upper))
-
     def _angular_distance(self, q1: np.ndarray, q2: np.ndarray) -> float:
         """Distance between configurations, handling angular wraparound.
 
-        Wraparound is resolved here so the metric only ever sees a genuine
-        displacement; the metric then decides how to measure it (Euclidean by
-        default, or by kinetic energy when one is configured).
+        Wraparound is resolved by ``self.space`` so the metric only ever sees a
+        genuine displacement; the metric then decides how to measure it
+        (Euclidean by default, or by kinetic energy when one is configured).
         """
         diff = self._angular_direction(q1, q2)
         return self._metric_norm(q1, diff)
+
+    def _angular_direction(self, q_from: np.ndarray, q_to: np.ndarray) -> np.ndarray:
+        """Direction from ``q_from`` to ``q_to``. Thin wrapper over ``self.space``."""
+        return self.space.direction(q_from, q_to)
 
     def _metric_norm(self, q: np.ndarray, dq: np.ndarray) -> float:
         """Length of displacement ``dq`` at ``q`` under the configured metric."""
@@ -715,7 +700,7 @@ class CBiRRT:
                 descent = np.asarray(natural_gradient(q_current, q_target), dtype=float)
                 # Keep the angular convention of the straight-line direction:
                 # wraparound was already resolved there.
-                if self.config.angular_joints is not None:
+                if self.space.angular_joints is not None:
                     descent = self._angular_direction(q_current, q_current + descent)
                 length = self._metric_norm(q_current, descent)
                 if length <= 1e-12:
@@ -733,7 +718,7 @@ class CBiRRT:
         Returns:
             Index of nearest node
         """
-        if self.config.angular_joints is None and self.config.metric is None:
+        if self.space.angular_joints is None and self.config.metric is None:
             # Use tree's built-in nearest (faster); it hardcodes the Euclidean
             # norm, so it is only valid when no metric is configured.
             return tree.nearest(q_target)
@@ -747,21 +732,6 @@ class CBiRRT:
                 best_dist = dist
                 best_idx = i
         return best_idx
-
-    def _angular_direction(self, q_from: np.ndarray, q_to: np.ndarray) -> np.ndarray:
-        """Compute direction from q_from to q_to, handling angular wraparound.
-
-        Returns the shortest path direction for angular joints.
-        """
-        diff = q_to - q_from
-
-        if self.config.angular_joints is not None:
-            # Wrap angular differences to [-pi, pi]
-            for i, is_angular in enumerate(self.config.angular_joints):
-                if is_angular:
-                    diff[i] = np.arctan2(np.sin(diff[i]), np.cos(diff[i]))
-
-        return diff
 
     def _grow(self, tree: RRTree, q_target: np.ndarray, max_steps: int | None = None) -> tuple[int, bool]:
         """Grow tree toward target using EXT or CON behavior.
@@ -819,7 +789,7 @@ class CBiRRT:
             q_new = q_current + step
 
             # Check joint limits
-            if not self._is_within_limits(q_new):
+            if not self.space.within_limits(q_new):
                 break
 
             # Project onto constraint manifold if constraints exist
